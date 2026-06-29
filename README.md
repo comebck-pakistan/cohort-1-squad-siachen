@@ -11,37 +11,38 @@
 - Ahmed humayun
 - Vara Ali
 
+**GitHub usernames:**
+
+- [@MARRIYAM07](https://github.com/MARRIYAM07)
+- [@MustafaZafar929](https://github.com/MustafaZafar929)
+- [@Vara-Ali](https://github.com/Vara-Ali)
+- [@akilolpop](https://github.com/akilolpop)
+
 ---
 
 ## 💡 Our Idea
 
-Our squad is building from **one** of the ten ideas in the
-[Cohort 1 Product Challenge](https://github.com/Comebck-Pakistan/cohort-1-product-challenge). The
-idea is a starting line, not a spec — our job is to **narrow it** to one specific user,
-one painful problem, and one small thing we can ship in 8 weeks.
+Our squad picked **[Idea 1 — The Small-Business Brain (WhatsApp-first)](https://github.com/Comebck-Pakistan/cohort-1-product-challenge#idea-1--the-small-business-brain-whatsapp-first)** from the [Cohort 1 Product Challenge](https://github.com/Comebck-Pakistan/cohort-1-product-challenge). Below are our ideation-stage validation answers, reproduced exactly as we submitted them.
 
-**Pick one of the ten ideas, then delete the rest of this list:**
+### One specific user
 
-1. The Small-Business Brain (WhatsApp-first)
-2. The Urdu-First Study Coach
-3. The Shoebox-to-Books Bookkeeper
-4. The Freelancer's Co-Pilot
-5. The Always-On Front Desk (Voice/WhatsApp Agent)
-6. The Farmer's Advisor in Your Pocket
-7. The SME Paperwork Generator
-8. The Social-Commerce Support Agent
-9. The Fair First-Round Recruiter
-10. The Public-Services Navigator
+The owner/manager of a grooming and beauty salon in I-8 Markaz, Islamabad FABS Salon, getting at least 100 DMs on every social media platform everyday, with two staff members hired solely for this purpose and are currently overwhelmed with WhatsApp and Instagram messages. They lose leads everyday due to huge number of unanswered DMs
 
-### 📌 Our pick
+### The painful problem
 
-> _Fill this in as a squad._
+The person from FABS Salon in I-8 Markaz, Islamabad, told us he loses bookings every day because he can't reply to customer WhatsApp and Instagram messages within the 20–30 minute window that matters. His exact words: "Zaroori hai ke aap usay 20–30 minutes ke andar reply kar dein, verna customer lose hojata hay" Today their staff juggles in-person customers with messages, so DMs sit unanswered. Customers ask in Urdu and English, often sending photos of their hair or skin, and expect instant replies. He tried AI before but it failed on image analysis.
 
-- **Idea we picked:** _#__ — ____________________________________________
-- **One specific user:** _______________________________________________
-- **The painful problem:** _____________________________________________
-- **Our 8-week wedge (the one small thing we'll ship):** _______________
-- **The one number that proves people want it:** _______________________
+### Our 8-week wedge
+
+A WhatsApp-first AI receptionist for solo salon owners like FABS Salon in I-8 Markaz that auto-replies to customer FAQs (timing, price, booking) within seconds in Urdu and English, analyzes customer photos of hair and skin, captures bookings, and escalates medical or skin-condition questions to a human stylist.
+
+### The one number that proves people want it
+
+2-3 salon owners actively using the product daily for 30 consecutive days, including the FABS Salon owner we interviewed with at least 1 saying "I haven't missed a customer inquiry since I installed it"
+
+### Why we picked this idea
+
+We picked this over the other ideas because we have direct, validated evidence — not assumptions. Yesterday we interviewed the owner of FABS Salon in I-8 Markaz, Islamabad, who confirmed four things in one 10-minute conversation: (1) the pain is daily and measurable (bookings lost to slow replies, with 20–30 min being the threshold his customers expect), (2) he would refer other salon owners if it worked, and (3) he tried AI before and it failed specifically on image analysis a clear feature gap we can fill since his customers send hair and skin photos daily. We can reach 10+ salon owners in Islamabad and Lahore via Instagram DMs in a single day, and Pakistan has 200,000+ salons, mostly small and independent.
 
 ---
 
