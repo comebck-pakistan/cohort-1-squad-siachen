@@ -37,7 +37,7 @@ Fetches ONLY FABS Salon's data from database
               ↓
 Builds a prompt with that salon's services, slots, policies
               ↓
-Sends prompt to Claude API → gets a reply
+Sends prompt to LLM API → gets a reply
               ↓
 Sends reply back via Meta using FABS Salon's phone_number_id
               ↓
@@ -461,18 +461,45 @@ async function routeMessage(phoneNumberId, customerPhone, messageText) {
   const availableSlots = await bookingService.getAvailableSlots(salon.id)
   const prompt = llmService.buildPrompt(salon, history, messageText, availableSlots)
 
-  // ── STEP 6: Get reply from Claude ─────────────────────────────
+  // ── STEP 6: Get reply from LLM (TBD — Groq/MiniMax) ──────────
   const reply = await llmService.getReply(prompt)
 
+  // ── STEP 6.5: Escalation check — BEFORE sending ───────────────
+  // Based on FABS Salon interview finding: medical/skin questions
+  // must always go to a human — never answered by the agent
+  const ESCALATION_TRIGGERS = [
+    'skin', 'medical', 'allergy', 'reaction', 'infection',
+    'rash', 'treatment', 'disease', 'doctor', 'dermatologist'
+  ]
+
+  const combined = (reply + messageText).toLowerCase()
+  const needsEscalation = combined.includes('[escalate]') ||
+    ESCALATION_TRIGGERS.some(trigger => combined.includes(trigger))
+
+  let finalReply = reply
+
+  if (needsEscalation) {
+    // Notify salon owner directly
+    await whatsappService.sendMessage(
+      salon.phone_number_id,
+      salon.whatsapp_token,
+      salon.owner_phone,
+      `⚠️ Customer ${customerPhone} asked a medical/skin question. Please respond directly.`
+    )
+    // Send holding message to customer instead of AI reply
+    finalReply = "I'll connect you with our team for this. Please hold 🙏"
+    console.log(`⚠️ Escalated to human for salon: ${salon.name}`)
+  }
+
   // ── STEP 7: Save reply to history ─────────────────────────────
-  await conversationService.save(salon.id, customer.id, 'assistant', reply)
+  await conversationService.save(salon.id, customer.id, 'assistant', finalReply)
 
   // ── STEP 8: Send reply via WhatsApp ───────────────────────────
   await whatsappService.sendMessage(
     salon.phone_number_id,
     salon.whatsapp_token,
     customerPhone,
-    reply
+    finalReply
   )
 
   console.log(`✅ Full flow complete for salon: ${salon.name}`)
@@ -522,7 +549,7 @@ module.exports = { handleIncoming, routeMessage }
 **This week's goal:**
 ```
 ✅ llmService.buildPrompt() generates a correct system prompt with salon data
-✅ llmService.getReply() calls Claude API and returns a response
+✅ llmService.getReply() calls LLM API (TBD — Groq/MiniMax) and returns a response
 ✅ conversationService.save() and getHistory() work correctly
 ✅ messageController.routeMessage() orchestrates the full flow
 ```
@@ -560,10 +587,12 @@ If customer wants to book, collect in order:
 Then confirm: "Your [service] is booked for [date] at [time]. See you then! 🙂"
 
 ESCALATE TO HUMAN if:
+- Customer asks ANY medical or skin-related question (allergies, reactions, infections, treatments)
 - Customer is complaining or upset
 - Question is about something not in your information
 - Customer explicitly asks to speak to someone
-Escalation message: "I'll connect you with our team right away. Please hold 🙏"
+When escalating, always reply: "I'll connect you with our team for this. Please hold 🙏"
+Never attempt to answer medical or skin condition questions — always escalate.
 `
   return { systemPrompt, history, newMessage }
 }
@@ -604,7 +633,7 @@ DATABASE (Member 2)
 ☐ customerService.getOrCreate() creates new customer in DB
 
 LLM (Member 3)
-☐ Claude API key works (test with simple curl)
+☐ LLM API key works — Groq/MiniMax (test with simple curl)
 ☐ buildPrompt() returns a string containing salon name and services
 ☐ getReply() returns a non-empty string response
 ☐ conversationService saves and retrieves messages correctly
@@ -617,7 +646,7 @@ WHATSAPP SENDING (Member 4)
 FULL END TO END
 ☐ Customer texts test salon number
 ☐ Message appears in server logs
-☐ Claude generates a reply
+☐ LLM generates a reply
 ☐ Reply received on customer's phone
 ☐ Conversation saved in database
 ```
@@ -637,4 +666,5 @@ FULL END TO END
 
 ---
 
-*Last updated: Week 2 — Squad Siachen — Comebck Pakistan Cohort 1 — 2026*
+*Last updated: Week 3 — Squad Siachen — Comebck Pakistan Cohort 1 — 2026*
+*Changes: Added Step 6.5 escalation flow (FABS medical/skin guardrail), updated LLM references to TBD (evaluating Groq/MiniMax)*
