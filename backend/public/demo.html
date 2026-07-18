@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Halo — WhatsApp AI Receptionist Demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    margin: 0;
+    padding: 24px;
+    background: #f5f3ef;
+    color: #1a1a1a;
+  }
+  .container {
+    max-width: 720px;
+    margin: 0 auto;
+  }
+  h1 { margin: 0 0 4px 0; font-size: 22px; }
+  .subtitle { color: #6b6b6b; margin-bottom: 24px; font-size: 14px; }
+  .card {
+    background: #fff;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: #444;
+  }
+  select, input, button {
+    width: 100%;
+    padding: 10px 12px;
+    font-size: 14px;
+    border: 1px solid #d6d3cc;
+    border-radius: 8px;
+    background: #fff;
+    font-family: inherit;
+  }
+  button {
+    background: #1a8a4a;
+    color: white;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    margin-top: 8px;
+  }
+  button:hover { background: #157d3f; }
+  button:disabled { background: #9b9b9b; cursor: not-allowed; }
+  .chat-window {
+    height: 380px;
+    overflow-y: auto;
+    border: 1px solid #e8e5dd;
+    border-radius: 8px;
+    padding: 12px;
+    background: #ece5dd;
+  }
+  .msg {
+    max-width: 75%;
+    margin: 4px 0;
+    padding: 8px 12px;
+    border-radius: 12px;
+    font-size: 14px;
+    line-height: 1.4;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+  }
+  .msg.user {
+    background: #dcf8c6;
+    margin-left: auto;
+    border-bottom-right-radius: 4px;
+  }
+  .msg.agent {
+    background: #fff;
+    margin-right: auto;
+    border-bottom-left-radius: 4px;
+  }
+  .msg.system {
+    background: transparent;
+    color: #888;
+    font-size: 12px;
+    text-align: center;
+    max-width: 100%;
+    margin: 8px auto;
+    font-style: italic;
+  }
+  .input-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .input-row input { flex: 1; }
+  .input-row button { width: auto; padding: 10px 20px; margin-top: 0; }
+  .meta { font-size: 11px; color: #888; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Halo — WhatsApp AI Receptionist</h1>
+  <div class="subtitle">Live demo · backed by Supabase + MiniMax M3</div>
+
+  <div class="card">
+    <label for="biz">Select a salon (multi-tenant routing demo)</label>
+    <select id="biz"></select>
+    <div class="meta">Each salon is a separate row in <code>public.businesses</code>. Messages route based on this selection.</div>
+  </div>
+
+  <div class="card">
+    <label>Conversation</label>
+    <div id="chat" class="chat-window"></div>
+    <div class="input-row">
+      <input id="msg" type="text" placeholder="Type a customer message..." autocomplete="off" />
+      <button id="send">Send</button>
+    </div>
+    <div class="meta">Try: "Hi, what services do you offer?" · "I want to book for Saturday 3pm" · "How much is a haircut?"</div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const chat = $('chat');
+const msgInput = $('msg');
+const sendBtn = $('send');
+const bizSelect = $('biz');
+
+let currentBusinessId = null;
+let currentBusinessName = null;
+let customerPhone = '+923001234567'; // demo phone
+
+function append(text, who) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + who;
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+async function loadBusinesses() {
+  try {
+    const res = await fetch('/demo/businesses');
+    const json = await res.json();
+    bizSelect.innerHTML = '';
+    if (!json.businesses || json.businesses.length === 0) {
+      const opt = document.createElement('option');
+      opt.textContent = '(no active businesses)';
+      opt.disabled = true;
+      bizSelect.appendChild(opt);
+      sendBtn.disabled = true;
+      return;
+    }
+    json.businesses.forEach((b) => {
+      const opt = document.createElement('option');
+      opt.value = b.id;
+      opt.textContent = `${b.name}${b.city ? ' — ' + b.city : ''} (${b.business_type})`;
+      bizSelect.appendChild(opt);
+    });
+    onBusinessChange();
+  } catch (e) {
+    append('Failed to load businesses: ' + e.message, 'system');
+  }
+}
+
+function onBusinessChange() {
+  currentBusinessId = bizSelect.value;
+  currentBusinessName = bizSelect.options[bizSelect.selectedIndex]?.text || '';
+  chat.innerHTML = '';
+  append(`Started conversation with ${currentBusinessName}`, 'system');
+}
+
+async function sendMessage() {
+  const text = msgInput.value.trim();
+  if (!text || !currentBusinessId) return;
+  append(text, 'user');
+  msgInput.value = '';
+  sendBtn.disabled = true;
+  sendBtn.textContent = '...';
+
+  try {
+    const res = await fetch('/demo/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        business_id: currentBusinessId,
+        customer_phone: customerPhone,
+        customer_name: 'Demo Customer',
+        message: text,
+      }),
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      append('Error: ' + (json.error || res.status), 'system');
+    } else {
+      append(json.reply, 'agent');
+    }
+  } catch (e) {
+    append('Network error: ' + e.message, 'system');
+  } finally {
+    sendBtn.disabled = false;
+    sendBtn.textContent = 'Send';
+  }
+}
+
+bizSelect.addEventListener('change', onBusinessChange);
+sendBtn.addEventListener('click', sendMessage);
+msgInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') sendMessage();
+});
+
+loadBusinesses();
+</script>
+</body>
+</html>
