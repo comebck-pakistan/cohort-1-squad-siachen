@@ -10,7 +10,7 @@ database/
 │   ├── 04_auth_trigger.sql
 │   ├── 05_whatsapp_sessions.sql
 │   ├── 06_edge_case_rules.sql
-│   ├── 07_tier_limits.sql        (rename from "7_tier_limits.sql" — see note below)
+│   ├── 07_tier_limits.sql        
 │   ├── 08_migration_v1_2.sql
 │   ├── 09_business_capacity.sql
 │   └── 10_edge_case_rule_limits.sql
@@ -19,7 +19,6 @@ database/
     └── 07_test_users_seed.sql
 ```
 
-**⚠️ One naming fix needed:** every other file in `schema/` has a two-digit prefix (`01`...`10`), but `7_tier_limits.sql` doesn't. Windows Explorer's natural sort hides this, but plain alphabetical sort (GitHub's file browser, `ls`, `git log`) would sort `"7_..."` *after* `"10_..."`, since `'7' > '1'` as the first character. Rename it to `07_tier_limits.sql` so it sorts correctly everywhere, not just in Explorer.
 
 ## How to run
 
