@@ -5,9 +5,9 @@ import {
   getBusinessIdForPhoneNumberId,
   getOrCreateCustomer,
   getOrCreateConversation,
-  getRecentMessages,
+  getConversationStateForPrompt,
   getSalonContext,
-  saveMessage,
+  updateConversationState,
   touchConversation,
 } from '../lib/db';
 
@@ -52,10 +52,13 @@ router.get('/webhook', (req: Request, res: Response) => {
 //   3. Route via businesses table (phone_number_id → business_id).
 //      Any customer can message us — we don't pre-map customer phones.
 //   4. Get-or-create the customer (by `from` phone) + conversation.
-//   5. Save the incoming customer message.
-//   6. Ask the LLM for a reply (or use fallback if LLM not configured).
-//   7. Save the agent's reply.
+//   5. Save the incoming customer message into structured state.
+//   6. Ask the LLM for a reply using the structured state as context.
+//   7. Save the agent's reply into structured state.
 //   8. Send the reply back via Meta's API.
+//
+// (Migration 2026-07-22: raw messages are no longer persisted. The bot
+//  reads/writes structured conversation_state instead.)
 //
 router.post('/webhook', async (req: Request, res: Response) => {
   // Step 1 — ack Meta right away
@@ -92,8 +95,10 @@ router.post('/webhook', async (req: Request, res: Response) => {
         const customerId = await getOrCreateCustomer(from);
         conversationId = await getOrCreateConversation(businessId, customerId);
 
-        // Step 5 — save incoming customer message
-        await saveMessage(conversationId, 'customer', text);
+        // Step 5 — record the incoming customer message as structured state
+        await updateConversationState(conversationId, {
+          last_customer_msg: text,
+        });
         await touchConversation(conversationId);
       } catch (dbError) {
         // Persistence failures shouldn't kill the reply path.
@@ -126,26 +131,29 @@ router.post('/webhook', async (req: Request, res: Response) => {
             staff_count: 0,
             is_configured: false,
           };
-      // Load recent message history so the LLM has context (e.g. "tomorrow
-      // 3pm" only makes sense if the bot knows they were talking about
-      // Hair Cut from a previous turn).
-      const conversationHistory = conversationId
-        ? await getRecentMessages(conversationId, 10)
-        : [];
+      // Load structured conversation state. Replaces old
+      // `getRecentMessages(...)` history threading. The LLM now uses
+      // structured slots (intent, service, date, time, name, phone)
+      // plus the last exchange lines for tone.
+      const conversationStatePrompt = conversationId
+        ? await getConversationStateForPrompt(conversationId)
+        : '';
       replyMessage = await generateReply({
         customerMessage: text,
         salonContext,
-        conversationHistory,
+        conversationStatePrompt,
       });
     } catch (llmError) {
       console.error('LLM error, using fallback:', llmError);
       replyMessage = 'Thanks for your message. We will get back to you shortly.';
     }
 
-    // Step 7 — save agent's reply (best-effort)
+    // Step 7 — record the agent's reply in structured state (best-effort)
     if (conversationId) {
       try {
-        await saveMessage(conversationId, 'agent', replyMessage);
+        await updateConversationState(conversationId, {
+          last_agent_msg: replyMessage,
+        });
         await touchConversation(conversationId);
       } catch (saveErr) {
         console.warn('Failed to save agent reply:', (saveErr as Error).message);
