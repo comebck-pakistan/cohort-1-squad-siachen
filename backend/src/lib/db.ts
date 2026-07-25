@@ -31,10 +31,6 @@ export async function getBusinessIdForPhoneNumberId(phoneNumberId: string): Prom
 }
 
 /**
- * Find an existing customer by phone, or create a new row.
- * Customers are platform-wide (one phone can belong to multiple salons).
- */
-/**
  * Find an existing customer by phone, or create one.
  *
  * Race-safe: uses upsert so two concurrent requests for the same
@@ -90,11 +86,10 @@ export async function getOrCreateCustomer(phone: string): Promise<string> {
  * or create a new one. We pick the most-recent active conversation
  * to keep chat history contiguous.
  *
- * Race-safe: same pattern as getOrCreateCustomer. Conversations
- * don't have a natural unique constraint to lean on (the natural
- * key would be (business_id, customer_id, status='active'), but
- * status='resolved' can have many rows), so we use a SELECT-then-
- * INSERT-with-fallback pattern.
+ * Race-safe: same pattern as getOrCreateCustomer. The DB-level
+ * partial unique index (`idx_one_active_conversation`) on
+ * (business_id, customer_id) WHERE status='active' is the source
+ * of truth — we let the database decide and we read the winner's id.
  */
 export async function getOrCreateConversation(
   businessId: string,
@@ -144,63 +139,40 @@ export async function getOrCreateConversation(
 }
 
 /**
- * Insert a single message into the conversation log.
- * `sender_type` matches Marriyam's `message_sender` enum.
+ * @deprecated No-op stub. Bot no longer writes raw messages to the
+ * `messages` table. Use `updateConversationState()` instead — that
+ * writes to `conversation_state`, which is now the source of truth
+ * per `docs/SUPABASE_CHANGELOG.md` (2026-07-22).
+ *
+ * Kept as a no-op so existing callers (webhook.ts, demo.ts) don't
+ * break during migration. Safe to delete once those callers are
+ * fully migrated to updateConversationState().
  */
 export async function saveMessage(
   conversationId: string,
   senderType: SenderType,
   content: string
 ): Promise<void> {
-  const { error } = await getSupabase()
-    .from('messages')
-    .insert({
-      conversation_id: conversationId,
-      sender_type: senderType,
-      content,
-    });
-
-  if (error) {
-    throw new Error(`Failed to save message: ${error.message}`);
-  }
+  console.warn(
+    '[saveMessage] deprecated no-op — conversation_state is now the source of truth (see docs/SUPABASE_CHANGELOG.md 2026-07-22)'
+  );
 }
 
 /**
- * Load the most recent N messages in a conversation, ordered
- * oldest-first. Used to give the LLM conversation history so it
- * doesn't reply out of context when a customer says "tomorrow 3pm"
- * without restating what they want to book.
+ * @deprecated Returns []. Messages table no longer holds live data;
+ * structured `conversation_state` is the source of truth. Use
+ * `getConversationStateForPrompt()` instead, which returns a
+ * formatted markdown block the bot includes in its system prompt.
  *
- * Returns messages in OpenAI's expected format: alternating
- * user/assistant roles. The customer maps to 'user', the agent
- * (bot) maps to 'assistant'. Owner messages are excluded — those
- * are admin interventions we don't want the bot to see.
+ * Kept as a no-op stub returning [] so existing callers don't
+ * break during migration.
  */
 export async function getRecentMessages(
   conversationId: string,
   limit: number = 10
 ): Promise<Array<{ role: 'user' | 'assistant'; content: string }>> {
-  const { data, error } = await getSupabase()
-    .from('messages')
-    .select('sender_type, content, created_at')
-    .eq('conversation_id', conversationId)
-    .in('sender_type', ['customer', 'agent'])
-    .order('created_at', { ascending: false })
-    .limit(limit);
-
-  if (error || !data) {
-    console.warn('getRecentMessages failed:', error?.message);
-    return [];
-  }
-
-  // Reverse so oldest is first, then map to OpenAI roles
-  return data
-    .slice()
-    .reverse()
-    .map((m) => ({
-      role: m.sender_type === 'customer' ? ('user' as const) : ('assistant' as const),
-      content: m.content,
-    }));
+  // Intentionally returns [] — see deprecation note above.
+  return [];
 }
 
 /**
@@ -217,6 +189,114 @@ export async function touchConversation(conversationId: string): Promise<void> {
     // Non-fatal — we don't want to fail the whole flow over a timestamp update.
     console.warn('touchConversation failed:', error.message);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Conversation state — replaces verbatim message storage as source of truth
+// ---------------------------------------------------------------------------
+
+/**
+ * Patch fields for `updateConversationState`. All fields optional.
+ * `business_id` is fetched internally from the conversations table
+ * so callers only need the conversation id.
+ */
+export interface ConversationStatePatch {
+  current_intent?: string;
+  service_interest?: string;
+  preferred_date?: string;
+  preferred_time?: string;
+  customer_name?: string;
+  customer_phone?: string;
+  last_customer_msg?: string;
+  last_agent_msg?: string;
+  status?: string;
+  outcome?: string;
+}
+
+/**
+ * Upsert into `conversation_state`. Looks up `business_id` from
+ * `conversations` so callers only pass conversationId + the patch
+ * fields they want to set. Idempotent — safe to call repeatedly
+ * with the same patch.
+ *
+ * This is the new source of truth for "what this conversation is
+ * about" — replaces raw message storage as the bot's context.
+ */
+export async function updateConversationState(
+  conversationId: string,
+  patch: ConversationStatePatch
+): Promise<void> {
+  // Look up business_id from conversations so we don't make the
+  // caller pass it on every call.
+  const { data: conv, error: convErr } = await getSupabase()
+    .from('conversations')
+    .select('business_id')
+    .eq('id', conversationId)
+    .maybeSingle();
+
+  if (convErr) {
+    throw new Error(
+      `updateConversationState: conversations lookup failed: ${convErr.message}`
+    );
+  }
+  if (!conv) {
+    throw new Error(
+      `updateConversationState: conversation ${conversationId} not found`
+    );
+  }
+
+  const { error } = await getSupabase()
+    .from('conversation_state')
+    .upsert({
+      conversation_id: conversationId,
+      business_id: conv.business_id,
+      ...patch,
+      updated_at: new Date().toISOString(),
+    });
+
+  if (error) {
+    throw new Error(`updateConversationState failed: ${error.message}`);
+  }
+}
+
+/**
+ * Read the conversation's structured state and return a formatted
+ * markdown block the bot includes in its system prompt. Replaces
+ * message-history threading — the LLM now sees slots instead of
+ * raw turns.
+ *
+ * Returns a placeholder if the conversation has no state row yet
+ * (e.g. very first message just arrived and hasn't been written).
+ */
+export async function getConversationStateForPrompt(
+  conversationId: string
+): Promise<string> {
+  const { data, error } = await getSupabase()
+    .from('conversation_state')
+    .select('*')
+    .eq('conversation_id', conversationId)
+    .maybeSingle();
+
+  if (error) {
+    console.warn(`getConversationStateForPrompt failed: ${error.message}`);
+    return '## Conversation state\n(no state yet — first message)';
+  }
+  if (!data) {
+    return '## Conversation state\n(no state yet — first message)';
+  }
+
+  const lines: string[] = ['## Conversation state'];
+  if (data.current_intent)    lines.push(`- Intent: ${data.current_intent}`);
+  if (data.service_interest)  lines.push(`- Service interest: ${data.service_interest}`);
+  if (data.preferred_date)    lines.push(`- Preferred date: ${data.preferred_date}`);
+  if (data.preferred_time)    lines.push(`- Preferred time: ${data.preferred_time}`);
+  if (data.customer_name)     lines.push(`- Customer name: ${data.customer_name}`);
+  if (data.customer_phone)    lines.push(`- Customer phone: ${data.customer_phone}`);
+  if (data.status)            lines.push(`- Status: ${data.status}`);
+  if (data.outcome)           lines.push(`- Outcome: ${data.outcome}`);
+  if (data.last_customer_msg) lines.push(`- Last customer said: "${data.last_customer_msg}"`);
+  if (data.last_agent_msg)    lines.push(`- Last agent said: "${data.last_agent_msg}"`);
+  return lines.join('\n');
 }
 
 // ---------------------------------------------------------------------------

@@ -1,9 +1,9 @@
 // Demo / jury-presentation routes.
 //
 // Bypasses WhatsApp entirely — same backend AI logic (Supabase routing +
-// MiniMax LLM reply + message persistence) but exposed over plain HTTP.
-// Lets us demo multi-tenant routing in the jury room without depending on
-// Meta's flaky test-mode UX.
+// MiniMax LLM reply + structured state persistence) but exposed over
+// plain HTTP. Lets us demo multi-tenant routing in the jury room without
+// depending on Meta's flaky test-mode UX.
 //
 // Endpoints:
 //   GET  /demo/businesses         → list all active businesses (for widget dropdown)
@@ -13,19 +13,22 @@
 //   1. Resolve business
 //   2. Get-or-create customer
 //   3. Get-or-create conversation
-//   4. Save customer message
-//   5. Generate LLM reply
-//   6. Save agent reply
+//   4. Save customer message into conversation_state (structured)
+//   5. Generate LLM reply using structured state as context
+//   6. Save agent reply into conversation_state (structured)
 //   7. Return reply
+//
+// Migration 2026-07-22: raw messages are no longer persisted.
+// conversation_state is the source of truth for slot-style context.
 
 import { Router, Request, Response } from 'express';
 import { generateReply } from '../lib/llm';
 import {
   getOrCreateCustomer,
   getOrCreateConversation,
-  getRecentMessages,
+  getConversationStateForPrompt,
   getSalonContext,
-  saveMessage,
+  updateConversationState,
   touchConversation,
 } from '../lib/db';
 import { getSupabase } from '../lib/supabase';
@@ -90,31 +93,38 @@ router.post('/demo/chat', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Business not found or inactive' });
     }
 
-    // 2-4. Customer + conversation + save incoming message
+    // 2-3. Customer + conversation
     const customerId = await getOrCreateCustomer(customer_phone);
     const conversationId = await getOrCreateConversation(business.id, customerId);
-    await saveMessage(conversationId, 'customer', message);
+
+    // 4. Record customer message into structured state (replaces raw
+    //    write to `messages` table).
+    await updateConversationState(conversationId, {
+      last_customer_msg: message,
+    });
     await touchConversation(conversationId);
 
-    // 5. Load salon context (services, hours, staff) and recent message
-    //    history so the LLM has context (e.g. "tomorrow 3pm" only makes
-    //    sense if the bot knows they were talking about Hair Cut).
+    // 5. Load salon context (services, hours, staff) plus structured
+    //    conversation state. The LLM now sees slots (intent, service,
+    //    date, time, name, phone) instead of message history.
     const salonContext = await getSalonContext(business.id);
-    const conversationHistory = await getRecentMessages(conversationId, 10);
+    const conversationStatePrompt = await getConversationStateForPrompt(conversationId);
     let reply: string;
     try {
       reply = await generateReply({
         customerMessage: message,
         salonContext,
-        conversationHistory,
+        conversationStatePrompt,
       });
     } catch (llmErr) {
       console.error('LLM error in /demo/chat:', llmErr);
       reply = 'Sorry, I am having trouble responding right now. Please try again in a moment.';
     }
 
-    // 6. Save agent reply
-    await saveMessage(conversationId, 'agent', reply);
+    // 6. Record agent reply into structured state.
+    await updateConversationState(conversationId, {
+      last_agent_msg: reply,
+    });
     await touchConversation(conversationId);
 
     // 7. Return

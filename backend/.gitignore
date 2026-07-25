@@ -27,3 +27,12 @@ coverage/
 
 # Misc
 *.tsbuildinfo
+
+# WhatsApp-web.js session storage
+# Contains WhatsApp session credentials (sensitive!) and Chromium user data
+# (IndexedDB, cookies, cache — ~100MB per salon). NEVER commit.
+sessions/
+.wwebjs_cache/
+
+# Puppeteer browser cache (Chromium download)
+.local-chromium/

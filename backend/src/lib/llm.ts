@@ -30,13 +30,14 @@ Hard rules:
 
 /**
  * Build the per-business system prompt by appending the salon's real data
- * (services, hours, staff count) to the base personality.
+ * (services, hours, staff count) plus the structured conversation state
+ * to the base personality.
  *
  * The context may be partial (owner hasn't set everything up yet) — the
  * resulting prompt explicitly tells the LLM what's missing so it can
  * gracefully degrade.
  */
-function buildSystemPrompt(ctx: SalonContext): string {
+function buildSystemPrompt(ctx: SalonContext, conversationStatePrompt?: string): string {
   const lines: string[] = [BASE_PROMPT, '', `## You are answering for: ${ctx.name}`];
   if (ctx.city) lines.push(`Location: ${ctx.city}`);
   lines.push(`Timezone: ${ctx.timezone}`);
@@ -72,12 +73,35 @@ function buildSystemPrompt(ctx: SalonContext): string {
 
   lines.push(`## Staff: ${ctx.staff_count} active`);
   lines.push('');
+
+  // Structured conversation state — the new source of truth.
+  // Replaces verbatim message history. Always included even if empty
+  // so the LLM is always aware of the state shape.
+  if (conversationStatePrompt && conversationStatePrompt.trim()) {
+    lines.push(conversationStatePrompt);
+    lines.push('');
+  } else {
+    lines.push('## Conversation state');
+    lines.push('(no state yet — first message in this conversation)');
+    lines.push('');
+  }
+
   lines.push('## Booking flow (when a customer wants to book)');
   lines.push('1. Confirm which service they want');
   lines.push('2. Confirm their preferred date and time');
   lines.push('3. If you have hours for that day, confirm the time falls within them');
   lines.push('4. Ask for their full name and phone number to confirm');
   lines.push('5. Tell them the salon will confirm shortly (do NOT promise the slot)');
+  lines.push('');
+  lines.push('CRITICAL WORDING RULE: Until the salon has ACTUALLY');
+  lines.push('confirmed in our system, NEVER use past-tense words like');
+  lines.push('"booked", "book hai", "confirmed", "set", "scheduled".');
+  lines.push('You are REQUESTING on their behalf. Use conditional phrases:');
+  lines.push('  - "I will request 3pm for you"');
+  lines.push('  - "Will let the salon know — they will confirm shortly"');
+  lines.push('  - "Submitting your request now, salon will confirm"');
+  lines.push('Only AFTER the system has confirmed a booking can you');
+  lines.push('say "your appointment is booked".');
   lines.push('');
   lines.push('## Handling short / vague replies');
   lines.push('Customers often reply with just a time ("kal 3 bjay") or a word');
@@ -93,21 +117,29 @@ function buildSystemPrompt(ctx: SalonContext): string {
 interface GenerateReplyOptions {
   customerMessage: string;
   salonContext: SalonContext;
-  conversationHistory?: { role: 'user' | 'assistant'; content: string }[];
+  /**
+   * Formatted markdown block describing the conversation's structured
+   * state (intent, slots, last exchanges). Produced by
+   * `getConversationStateForPrompt()` in db.ts. Replaces the old
+   * message-history list as the source of truth for "what is this
+   * conversation about".
+   */
+  conversationStatePrompt?: string;
 }
 
 export async function generateReply({
   customerMessage,
   salonContext,
-  conversationHistory = [],
+  conversationStatePrompt,
 }: GenerateReplyOptions): Promise<string> {
   try {
-    const systemPrompt = buildSystemPrompt(salonContext);
+    const systemPrompt = buildSystemPrompt(salonContext, conversationStatePrompt);
 
-    // OpenAI format: system message is the first item in the messages array
-    const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+    // OpenAI format: a single system message + a single user message.
+    // Conversation context flows in via the state's prompt section
+    // (see buildSystemPrompt). No message-history array needed anymore.
+    const messages: Array<{ role: 'system' | 'user'; content: string }> = [
       { role: 'system', content: systemPrompt },
-      ...conversationHistory,
       { role: 'user', content: customerMessage },
     ];
 
@@ -128,9 +160,9 @@ export async function generateReply({
 
     // OpenAI-format response: choices[0].message.content
     const rawReply: string = response.data?.choices?.[0]?.message?.content || '';
-    // Strip any <think>...</think> reasoning blocks (some models return them
+    // Strip any ﻿think...﻿/think reasoning blocks (some models return them
     // inline). WhatsApp customers should only see the final answer.
-    const reply = rawReply.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    const reply = rawReply.replace(/\<think\>[\s\S]*?\<\/think\>/g, '').trim();
     return reply || 'Sorry, I could not generate a reply. Please try again.';
   } catch (error: any) {
     console.error('LLM call failed:', error.response?.data || error.message);
