@@ -473,4 +473,179 @@ curl http://localhost:3000/api/business/$BUSINESS_ID/today \
 6. **Conversations inbox** (calls `/business/:id/conversations`)
 7. **Date-range booking calendar** (calls `/business/:id/bookings?date=…`)
 
+---
+
+## 10. Superadmin endpoints (`/api/*` — under `Recepta /superadmin`)
+
+All require `Authorization: Bearer <jwt>` AND `profiles.role === 'superadmin'`.
+Backend rejects non-superadmin tokens with 403.
+
+### Field-name adapters (DB → frontend)
+
+The frontend uses `billing_status` and `monthlyMessages` / `concurrentAgents` / `pricePKR` — we rename at the API boundary so the React Query layer doesn't have to:
+
+| Frontend | DB | Notes |
+|---|---|---|
+| `Business.billing_status` | `businesses.billing_state` | renamed |
+| `TierLimits.monthlyMessages` | `tier_limits.max_messages_mo` | renamed |
+| `TierLimits.concurrentAgents` | `tier_limits.max_staff_members` | semantic mapping |
+| `TierLimits.pricePKR` | `subscriptions.monthly_price` (max per active sub of that tier) | derived |
+
+### Salons CRUD
+
+**`GET /api/salons`** — list all businesses (sorted newest first)
+
+Response (200) — array of:
+```json
+{
+  "id": "uuid",
+  "name": "FABS Beauty Lounge & Salon",
+  "tier": "basic" | "pro" | "business",
+  "phone_number_id": "1043221109888" | null,
+  "whatsapp_number": "923001234567" | null,
+  "billing_status": "active" | "grace_period" | "suspended",
+  "city": "Islamabad" | null,
+  "agent_active": true | false,
+  "created_at": "2026-07-25T18:43:01.000Z",
+  "messages_month": 12480,    // count of customer messages in last 30 days
+  "mrr_pkr": 24000            // sum of active subscriptions' monthly_price
+}
+```
+
+**`POST /api/salons`** — create a new business
+```json
+{
+  "name": "Glow Studio Karachi",
+  "tier": "business",                 // default 'basic' if omitted
+  "phoneNumberId": "1043221109888",   // optional
+  "systemAccessToken": "EAAd...",     // optional (backend stores; not exposed)
+  "whatsappNumber": "923001234567",
+  "city": "Karachi"                   // optional
+}
+```
+Returns (201): same shape as GET item.
+
+**`PATCH /api/salons/:id`** — partial update of name / tier / phone / whatsapp / city / billing_state / agent_active
+
+**`DELETE /api/salons/:id`** — soft-delete (sets `agent_active=false` + `billing_state='suspended'`)
+Returns `{ "id": "...", "suspended": true }`
+
+**`PATCH /api/salons/:id/agent`** — kill switch for AI receptionist
+```json
+{ "active": true }
+```
+Hard rule: suspended tenants cannot be re-enabled — they must go through billing reactivation first.
+
+### Platform analytics
+
+**`GET /api/kpis`** — top-level counters
+```json
+{
+  "messagesDelivered": 128420,
+  "revenuePKR": 312000,
+  "pendingCases": 7,
+  "activeSalons": 4
+}
+```
+
+**`GET /api/revenue`** — 6-month revenue time series
+```json
+[
+  { "month": "Feb", "revenue": 184000 },
+  { "month": "Mar", "revenue": 212000 },
+  ...
+]
+```
+
+**`GET /api/payments?limit=50`** — last N subscription start/cancel events
+```json
+[
+  {
+    "id": "sub-uuid-start",
+    "business_name": "Glow Studio Karachi",
+    "amount_pkr": 24000,
+    "status": "paid" | "failed",
+    "method": "Card",
+    "created_at": "2026-07-22T09:12:00Z"
+  }
+]
+```
+
+**`GET /api/audit?limit=50`** — mixed feed of escalation_events + recent bookings
+```json
+[
+  {
+    "id": "uuid",
+    "business_id": "uuid",
+    "business_name": "FABS Beauty Lounge & Salon",
+    "kind": "booking" | "system",
+    "summary": "Booking confirmed — Haircut for Sara",
+    "created_at": "2026-07-25T..."
+  }
+]
+```
+
+### Settings
+
+**`GET /api/settings/tiers`** — list of tier configs
+```json
+[
+  { "tier": "basic", "monthlyMessages": 2000, "concurrentAgents": 1, "pricePKR": 4000 },
+  { "tier": "pro", "monthlyMessages": 10000, "concurrentAgents": 3, "pricePKR": 12000 },
+  { "tier": "business", "monthlyMessages": 50000, "concurrentAgents": 10, "pricePKR": 24000 }
+]
+```
+
+**`PATCH /api/settings/tiers`** — update tier limits
+```json
+[
+  { "tier": "pro", "monthlyMessages": 12000, "concurrentAgents": 5, "pricePKR": 15000 },
+  ...
+]
+```
+
+**`GET /api/settings/safety`** — global edge_case_rules split by rule_type
+```json
+{
+  "hard": ["Never diagnose skin conditions...", "Never book outside hours..."],
+  "soft": ["Prefer replies under 40 words...", ...]
+}
+```
+
+**`PATCH /api/settings/safety`** — replace global safety rules
+```json
+{ "hard": [...], "soft": [...] }
+```
+Warning: this REPLACES all global rules (deletes then re-inserts). Per-tenant rules are unaffected.
+
+### Onboarding status
+
+**`GET /onboarding/:businessId/status`** — current QR / WhatsApp session state
+```json
+{
+  "businessId": "uuid",
+  "status": "qr_ready" | "ready" | "initializing" | "not_found",
+  "hasQR": true | false
+}
+```
+MVP: derived from `agent_active`. Once session-manager state is plumbed in, this will reflect live QR readiness.
+
+### Seed: creating a superadmin user
+
+```sql
+-- 1. Create user in Supabase Dashboard: Authentication → Users → Add user
+--    (email + password). Note their auth.users.id.
+
+-- 2. Promote to superadmin:
+UPDATE public.profiles
+SET role = 'superadmin'
+WHERE id = (
+  SELECT id FROM auth.users WHERE email = 'your-admin@example.com'
+  LIMIT 1
+);
+```
+
+After this, log in at `/superadmin/login` in the frontend with that email + password.
+
+
 Skip for v1: payments, promotions, analytics, multi-branch.

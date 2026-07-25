@@ -9,47 +9,27 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as SuperadminRouteImport } from './routes/superadmin'
-import { Route as SitemapDotxmlRouteImport } from './routes/sitemap[.]xml'
-import { Route as SalonPortalRouteImport } from './routes/salon-portal'
-import { Route as OnboardingRouteImport } from './routes/onboarding'
-import { Route as LoginRouteImport } from './routes/login'
-import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as SuperadminIndexRouteImport } from './routes/superadmin.index'
+import { Route as DashboardRouteImport } from './routes/dashboard'
+import { Route as LoginRouteImport } from './routes/login'
+import { Route as OnboardingRouteImport } from './routes/onboarding'
+import { Route as SalonPortalRouteImport } from './routes/salon-portal'
+import { Route as SitemapDotxmlRouteImport } from './routes/sitemap[.]xml'
+import { Route as SuperadminRouteImport } from './routes/superadmin'
 import { Route as SalonPortalIndexRouteImport } from './routes/salon-portal.index'
-import { Route as SuperadminSubscriptionsRouteImport } from './routes/superadmin.subscriptions'
-import { Route as SuperadminSettingsRouteImport } from './routes/superadmin.settings'
-import { Route as SuperadminSalonsRouteImport } from './routes/superadmin.salons'
-import { Route as SuperadminLoginRouteImport } from './routes/superadmin.login'
-import { Route as SalonPortalInboxRouteImport } from './routes/salon-portal.inbox'
-import { Route as SalonPortalEscalationsRouteImport } from './routes/salon-portal.escalations'
-import { Route as SalonPortalBusinessRouteImport } from './routes/salon-portal.business'
 import { Route as SalonPortalAiRulesRouteImport } from './routes/salon-portal.ai-rules'
+import { Route as SalonPortalBusinessRouteImport } from './routes/salon-portal.business'
+import { Route as SalonPortalEscalationsRouteImport } from './routes/salon-portal.escalations'
+import { Route as SalonPortalInboxRouteImport } from './routes/salon-portal.inbox'
+import { Route as SuperadminIndexRouteImport } from './routes/superadmin.index'
+import { Route as SuperadminLoginRouteImport } from './routes/superadmin.login'
+import { Route as SuperadminSalonsRouteImport } from './routes/superadmin.salons'
+import { Route as SuperadminSettingsRouteImport } from './routes/superadmin.settings'
+import { Route as SuperadminSubscriptionsRouteImport } from './routes/superadmin.subscriptions'
 
-const SuperadminRoute = SuperadminRouteImport.update({
-  id: '/superadmin',
-  path: '/superadmin',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SitemapDotxmlRoute = SitemapDotxmlRouteImport.update({
-  id: '/sitemap.xml',
-  path: '/sitemap.xml',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SalonPortalRoute = SalonPortalRouteImport.update({
-  id: '/salon-portal',
-  path: '/salon-portal',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const OnboardingRoute = OnboardingRouteImport.update({
-  id: '/onboarding',
-  path: '/onboarding',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const LoginRoute = LoginRouteImport.update({
-  id: '/login',
-  path: '/login',
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DashboardRoute = DashboardRouteImport.update({
@@ -57,49 +37,39 @@ const DashboardRoute = DashboardRouteImport.update({
   path: '/dashboard',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const LoginRoute = LoginRouteImport.update({
+  id: '/login',
+  path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SuperadminIndexRoute = SuperadminIndexRouteImport.update({
-  id: '/',
-  path: '/',
-  getParentRoute: () => SuperadminRoute,
+const OnboardingRoute = OnboardingRouteImport.update({
+  id: '/onboarding',
+  path: '/onboarding',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SalonPortalRoute = SalonPortalRouteImport.update({
+  id: '/salon-portal',
+  path: '/salon-portal',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SitemapDotxmlRoute = SitemapDotxmlRouteImport.update({
+  id: '/sitemap.xml',
+  path: '/sitemap.xml',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SuperadminRoute = SuperadminRouteImport.update({
+  id: '/superadmin',
+  path: '/superadmin',
+  getParentRoute: () => rootRouteImport,
 } as any)
 const SalonPortalIndexRoute = SalonPortalIndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => SalonPortalRoute,
 } as any)
-const SuperadminSubscriptionsRoute = SuperadminSubscriptionsRouteImport.update({
-  id: '/subscriptions',
-  path: '/subscriptions',
-  getParentRoute: () => SuperadminRoute,
-} as any)
-const SuperadminSettingsRoute = SuperadminSettingsRouteImport.update({
-  id: '/settings',
-  path: '/settings',
-  getParentRoute: () => SuperadminRoute,
-} as any)
-const SuperadminSalonsRoute = SuperadminSalonsRouteImport.update({
-  id: '/salons',
-  path: '/salons',
-  getParentRoute: () => SuperadminRoute,
-} as any)
-const SuperadminLoginRoute = SuperadminLoginRouteImport.update({
-  id: '/login',
-  path: '/login',
-  getParentRoute: () => SuperadminRoute,
-} as any)
-const SalonPortalInboxRoute = SalonPortalInboxRouteImport.update({
-  id: '/inbox',
-  path: '/inbox',
-  getParentRoute: () => SalonPortalRoute,
-} as any)
-const SalonPortalEscalationsRoute = SalonPortalEscalationsRouteImport.update({
-  id: '/escalations',
-  path: '/escalations',
+const SalonPortalAiRulesRoute = SalonPortalAiRulesRouteImport.update({
+  id: '/ai-rules',
+  path: '/ai-rules',
   getParentRoute: () => SalonPortalRoute,
 } as any)
 const SalonPortalBusinessRoute = SalonPortalBusinessRouteImport.update({
@@ -107,10 +77,40 @@ const SalonPortalBusinessRoute = SalonPortalBusinessRouteImport.update({
   path: '/business',
   getParentRoute: () => SalonPortalRoute,
 } as any)
-const SalonPortalAiRulesRoute = SalonPortalAiRulesRouteImport.update({
-  id: '/ai-rules',
-  path: '/ai-rules',
+const SalonPortalEscalationsRoute = SalonPortalEscalationsRouteImport.update({
+  id: '/escalations',
+  path: '/escalations',
   getParentRoute: () => SalonPortalRoute,
+} as any)
+const SalonPortalInboxRoute = SalonPortalInboxRouteImport.update({
+  id: '/inbox',
+  path: '/inbox',
+  getParentRoute: () => SalonPortalRoute,
+} as any)
+const SuperadminIndexRoute = SuperadminIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => SuperadminRoute,
+} as any)
+const SuperadminLoginRoute = SuperadminLoginRouteImport.update({
+  id: '/login',
+  path: '/login',
+  getParentRoute: () => SuperadminRoute,
+} as any)
+const SuperadminSalonsRoute = SuperadminSalonsRouteImport.update({
+  id: '/salons',
+  path: '/salons',
+  getParentRoute: () => SuperadminRoute,
+} as any)
+const SuperadminSettingsRoute = SuperadminSettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
+  getParentRoute: () => SuperadminRoute,
+} as any)
+const SuperadminSubscriptionsRoute = SuperadminSubscriptionsRouteImport.update({
+  id: '/subscriptions',
+  path: '/subscriptions',
+  getParentRoute: () => SuperadminRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
@@ -239,39 +239,11 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/superadmin': {
-      id: '/superadmin'
-      path: '/superadmin'
-      fullPath: '/superadmin'
-      preLoaderRoute: typeof SuperadminRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/sitemap.xml': {
-      id: '/sitemap.xml'
-      path: '/sitemap.xml'
-      fullPath: '/sitemap.xml'
-      preLoaderRoute: typeof SitemapDotxmlRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/salon-portal': {
-      id: '/salon-portal'
-      path: '/salon-portal'
-      fullPath: '/salon-portal'
-      preLoaderRoute: typeof SalonPortalRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/onboarding': {
-      id: '/onboarding'
-      path: '/onboarding'
-      fullPath: '/onboarding'
-      preLoaderRoute: typeof OnboardingRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/login': {
-      id: '/login'
-      path: '/login'
-      fullPath: '/login'
-      preLoaderRoute: typeof LoginRouteImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/dashboard': {
@@ -281,19 +253,40 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DashboardRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/superadmin/': {
-      id: '/superadmin/'
-      path: '/'
-      fullPath: '/superadmin/'
-      preLoaderRoute: typeof SuperadminIndexRouteImport
-      parentRoute: typeof SuperadminRoute
+    '/onboarding': {
+      id: '/onboarding'
+      path: '/onboarding'
+      fullPath: '/onboarding'
+      preLoaderRoute: typeof OnboardingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/salon-portal': {
+      id: '/salon-portal'
+      path: '/salon-portal'
+      fullPath: '/salon-portal'
+      preLoaderRoute: typeof SalonPortalRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sitemap.xml': {
+      id: '/sitemap.xml'
+      path: '/sitemap.xml'
+      fullPath: '/sitemap.xml'
+      preLoaderRoute: typeof SitemapDotxmlRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/superadmin': {
+      id: '/superadmin'
+      path: '/superadmin'
+      fullPath: '/superadmin'
+      preLoaderRoute: typeof SuperadminRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/salon-portal/': {
       id: '/salon-portal/'
@@ -302,46 +295,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SalonPortalIndexRouteImport
       parentRoute: typeof SalonPortalRoute
     }
-    '/superadmin/subscriptions': {
-      id: '/superadmin/subscriptions'
-      path: '/subscriptions'
-      fullPath: '/superadmin/subscriptions'
-      preLoaderRoute: typeof SuperadminSubscriptionsRouteImport
-      parentRoute: typeof SuperadminRoute
-    }
-    '/superadmin/settings': {
-      id: '/superadmin/settings'
-      path: '/settings'
-      fullPath: '/superadmin/settings'
-      preLoaderRoute: typeof SuperadminSettingsRouteImport
-      parentRoute: typeof SuperadminRoute
-    }
-    '/superadmin/salons': {
-      id: '/superadmin/salons'
-      path: '/salons'
-      fullPath: '/superadmin/salons'
-      preLoaderRoute: typeof SuperadminSalonsRouteImport
-      parentRoute: typeof SuperadminRoute
-    }
-    '/superadmin/login': {
-      id: '/superadmin/login'
-      path: '/login'
-      fullPath: '/superadmin/login'
-      preLoaderRoute: typeof SuperadminLoginRouteImport
-      parentRoute: typeof SuperadminRoute
-    }
-    '/salon-portal/inbox': {
-      id: '/salon-portal/inbox'
-      path: '/inbox'
-      fullPath: '/salon-portal/inbox'
-      preLoaderRoute: typeof SalonPortalInboxRouteImport
-      parentRoute: typeof SalonPortalRoute
-    }
-    '/salon-portal/escalations': {
-      id: '/salon-portal/escalations'
-      path: '/escalations'
-      fullPath: '/salon-portal/escalations'
-      preLoaderRoute: typeof SalonPortalEscalationsRouteImport
+    '/salon-portal/ai-rules': {
+      id: '/salon-portal/ai-rules'
+      path: '/ai-rules'
+      fullPath: '/salon-portal/ai-rules'
+      preLoaderRoute: typeof SalonPortalAiRulesRouteImport
       parentRoute: typeof SalonPortalRoute
     }
     '/salon-portal/business': {
@@ -351,12 +309,54 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SalonPortalBusinessRouteImport
       parentRoute: typeof SalonPortalRoute
     }
-    '/salon-portal/ai-rules': {
-      id: '/salon-portal/ai-rules'
-      path: '/ai-rules'
-      fullPath: '/salon-portal/ai-rules'
-      preLoaderRoute: typeof SalonPortalAiRulesRouteImport
+    '/salon-portal/escalations': {
+      id: '/salon-portal/escalations'
+      path: '/escalations'
+      fullPath: '/salon-portal/escalations'
+      preLoaderRoute: typeof SalonPortalEscalationsRouteImport
       parentRoute: typeof SalonPortalRoute
+    }
+    '/salon-portal/inbox': {
+      id: '/salon-portal/inbox'
+      path: '/inbox'
+      fullPath: '/salon-portal/inbox'
+      preLoaderRoute: typeof SalonPortalInboxRouteImport
+      parentRoute: typeof SalonPortalRoute
+    }
+    '/superadmin/': {
+      id: '/superadmin/'
+      path: '/'
+      fullPath: '/superadmin/'
+      preLoaderRoute: typeof SuperadminIndexRouteImport
+      parentRoute: typeof SuperadminRoute
+    }
+    '/superadmin/login': {
+      id: '/superadmin/login'
+      path: '/login'
+      fullPath: '/superadmin/login'
+      preLoaderRoute: typeof SuperadminLoginRouteImport
+      parentRoute: typeof SuperadminRoute
+    }
+    '/superadmin/salons': {
+      id: '/superadmin/salons'
+      path: '/salons'
+      fullPath: '/superadmin/salons'
+      preLoaderRoute: typeof SuperadminSalonsRouteImport
+      parentRoute: typeof SuperadminRoute
+    }
+    '/superadmin/settings': {
+      id: '/superadmin/settings'
+      path: '/settings'
+      fullPath: '/superadmin/settings'
+      preLoaderRoute: typeof SuperadminSettingsRouteImport
+      parentRoute: typeof SuperadminRoute
+    }
+    '/superadmin/subscriptions': {
+      id: '/superadmin/subscriptions'
+      path: '/subscriptions'
+      fullPath: '/superadmin/subscriptions'
+      preLoaderRoute: typeof SuperadminSubscriptionsRouteImport
+      parentRoute: typeof SuperadminRoute
     }
   }
 }
@@ -413,3 +413,13 @@ const rootRouteChildren: RootRouteChildren = {
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
+
+import type { getRouter } from './router.tsx'
+import type { startInstance } from './start.ts'
+declare module '@tanstack/react-start' {
+  interface Register {
+    ssr: true
+    router: Awaited<ReturnType<typeof getRouter>>
+    config: Awaited<ReturnType<typeof startInstance.getOptions>>
+  }
+}

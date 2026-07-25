@@ -9,18 +9,34 @@ import type {
   SafetyRules,
   TierLimits,
 } from "@/types";
+import { supabase } from "./supabase";
 
 // ---------------------------------------------------------------------------
 // HTTP client — thin fetch wrapper hitting the halo-backend. Falls back to
 // deterministic mock data when the backend is not reachable so the dashboard
 // stays useful in the Lovable preview.
+//
+// Auth: every request now attaches `Authorization: Bearer <jwt>` from the
+// active Supabase session. The backend's requireAuth middleware verifies
+// the token and applies per-role + per-business authorization.
 // ---------------------------------------------------------------------------
 
 const BASE_URL = (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_URL) || "";
 
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  const { data } = await supabase().auth.getSession();
+  const token = data.session?.access_token;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const authHeaders = await getAuthHeaders();
   const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders,
+      ...(init?.headers ?? {}),
+    },
     ...init,
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);

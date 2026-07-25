@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
+import { useAuth } from "@/lib/auth";
 
 export const Route = createFileRoute("/login")({
   head: () => ({
@@ -23,6 +24,7 @@ export const Route = createFileRoute("/login")({
 
 function LoginPage() {
   const navigate = useNavigate();
+  const auth = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -34,20 +36,30 @@ function LoginPage() {
       return;
     }
     setLoading(true);
-    await new Promise((r) => setTimeout(r, 500));
-    setLoading(false);
-    localStorage.setItem("recepta.owner.session", JSON.stringify({ email }));
-    toast.success("Welcome back!");
-    navigate({ to: "/salon-portal" });
+    try {
+      const user = await auth.login(email, password);
+      toast.success(`Welcome back, ${user.name}!`);
+      // Route by role — superadmin goes to the platform dashboard,
+      // everyone else goes to their salon portal.
+      if (user.role === "superadmin") {
+        navigate({ to: "/superadmin" });
+      } else {
+        navigate({ to: "/salon-portal" });
+      }
+    } catch (err) {
+      toast.error((err as Error).message || "Invalid email or password");
+    } finally {
+      setLoading(false);
+    }
   }
 
   function handleGoogle() {
-    setLoading(true);
-    setTimeout(() => {
-      localStorage.setItem("recepta.owner.session", JSON.stringify({ email: "demo@recepta.pk" }));
-      toast.success("Signed in with Google");
-      navigate({ to: "/salon-portal" });
-    }, 600);
+    // Google OAuth not wired yet — would require configuring Google
+    // provider in Supabase + an OAuth client ID. Until that's set up,
+    // disable the button with a hint.
+    toast.error(
+      "Google sign-in isn't configured yet. Use email + password."
+    );
   }
 
   return (
