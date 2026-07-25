@@ -11,6 +11,8 @@ import express from 'express';
 import path from 'path';
 import webhookRouter from './routes/webhook';
 import demoRouter from './routes/demo';
+import authRouter from './routes/auth';
+import dashboardRouter from './routes/dashboard';
 import { logger, childLogger } from './lib/logger';
 import { SessionManager } from './whatsapp-web/session-manager';
 import { createOnboardingRouter } from './whatsapp-web/qr-server';
@@ -82,6 +84,12 @@ app.use('/demo', express.static(path.join(__dirname, '..', 'public')));
 
 // Demo chat route — always mounted, transport-agnostic.
 app.use(demoRouter);
+
+// Owner dashboard API — JWT auth + per-business scoping.
+// Auth routes (signup helper, /me) mounted at root /api/auth.
+app.use('/api', authRouter);
+// Dashboard CRUD at /api/business/... and /api/appointments/..., /api/staff/...
+app.use('/api', dashboardRouter);
 
 // ---------------------------------------------------------------------------
 // Transport-specific setup

@@ -7,6 +7,7 @@ import {
   touchConversation,
 } from './db';
 import { generateReply } from './llm';
+import { processBookingDecision } from './booking';
 import { childLogger } from './logger';
 
 // ---------------------------------------------------------------------------
@@ -20,13 +21,17 @@ import { childLogger } from './logger';
 //   whatsapp-web.js  (backend/src/whatsapp-web/client.ts)
 //     → calls handleIncomingMessage() after the 'message' event fires
 //
+//   Demo widget      (backend/src/routes/demo.ts)
+//     → calls handleIncomingMessage() to behave identically to production
+//
 // The transport layer's only job is:
-//   (1) get the message IN (webhook payload vs library event)
+//   (1) get the message IN (webhook payload vs library event vs HTTP body)
 //   (2) call handleIncomingMessage() with normalized fields
-//   (3) send the reply back OUT (Meta API vs client.sendMessage)
+//   (3) send the reply back OUT (Meta API vs client.sendMessage vs JSON)
 //
 // All business logic — customer/conversation lookup, state persistence,
-// LLM call, error boundaries — lives here and is identical across paths.
+// LLM call, booking decision, error boundaries — lives here and is
+// identical across paths.
 // ---------------------------------------------------------------------------
 
 const log = childLogger('message-handler');
@@ -56,6 +61,8 @@ export interface HandleResult {
   conversationId: string | null;
   /** Customer id used for this message, or null if persistence failed. */
   customerId: string | null;
+  /** Appointment outcome from the booking decision layer, if any. */
+  appointment: 'created' | 'rejected' | 'not_attempted' | 'error';
 }
 
 /**
@@ -80,19 +87,20 @@ function normalizePhone(raw: string): string {
  *   2. Get-or-create conversation for (business, customer) — race-safe
  *   3. Persist incoming message into conversation_state (structured)
  *   4. Load salon context (services, hours, staff) + state prompt
- *   5. Generate LLM reply using state-aware prompt
- *   6. Persist agent reply into conversation_state (best-effort)
- *   7. Return reply text for the transport to send back
+ *   5. Generate structured LLM reply (intent + slots + reply_text)
+ *   6. If intent='book' + all slots + confidence >= 50:
+ *        → persist slots to state
+ *        → call createAppointmentIfValid()
+ *        → rewrite reply with confirmation or specific rejection
+ *   7. Persist final agent reply into conversation_state (best-effort)
+ *   8. Return reply text for the transport to send back
  *
  * Error model:
- *   - Persistence failures (steps 1-3, 6) are non-fatal — we still try to
- *     produce a reply. The bot degrades gracefully: it forgets the customer
- *     for this round but the conversation still flows.
- *   - LLM failures (step 5) are caught and replaced with a fallback message.
- *     Only catastrophic throws produce reply=null.
- *
- * Production-grade criterion: every step is logged with structured fields.
- * No silent errors.
+ *   - Persistence failures (steps 1-3, 7) are non-fatal — we still try to
+ *     produce a reply. The bot degrades gracefully.
+ *   - LLM failures (step 5) return the FALLBACK_RESULT inside llm.ts.
+ *   - Booking failures (step 6) fall back to the LLM's conditional reply
+ *     so the customer never sees a generic error.
  */
 export async function handleIncomingMessage(
   opts: IncomingMessageOptions
@@ -100,19 +108,19 @@ export async function handleIncomingMessage(
   const { businessId, from, text } = opts;
   const customerPhone = normalizePhone(from);
 
-  // Per-request child logger so we can trace a single message through
-  // the whole pipeline with one filter.
   const requestLog = log.child({ businessId, customerPhone });
 
   if (!text || text.trim().length === 0) {
     requestLog.warn('empty message text — skipping');
-    return { reply: null, conversationId: null, customerId: null };
+    return {
+      reply: null,
+      conversationId: null,
+      customerId: null,
+      appointment: 'not_attempted',
+    };
   }
 
-  requestLog.info(
-    { textLength: text.length },
-    'incoming message'
-  );
+  requestLog.info({ textLength: text.length }, 'incoming message');
 
   let conversationId: string | null = null;
   let customerId: string | null = null;
@@ -136,33 +144,62 @@ export async function handleIncomingMessage(
     // Continue — bot still replies, just without persistence this round.
   }
 
-  // Steps 4–5: build context + generate reply
-  let reply: string | null = null;
+  // Steps 4–5: build context + generate structured LLM reply
+  const fallback = 'Sorry, I am having trouble responding right now. Please try again in a moment.';
+  let finalReply: string = fallback;
+  let appointmentStatus: HandleResult['appointment'] = 'not_attempted';
+
   try {
     const salonContext = await getSalonContext(businessId);
     const conversationStatePrompt = conversationId
       ? await getConversationStateForPrompt(conversationId)
       : '';
 
-    reply = await generateReply({
+    const llmResult = await generateReply({
       customerMessage: text,
       salonContext,
       conversationStatePrompt,
     });
-  } catch (llmError) {
+
+    // Step 6: booking decision (only if we have a conversationId for state writes)
+    if (conversationId && customerId) {
+      const decision = await processBookingDecision(llmResult, {
+        businessId,
+        customerId,
+        conversationId,
+      });
+      finalReply = decision.finalReply;
+      if (decision.appointment) {
+        appointmentStatus = decision.appointment.ok ? 'created' : 'rejected';
+        requestLog.info(
+          {
+            appointmentId:
+              'appointmentId' in decision.appointment
+                ? decision.appointment.appointmentId
+                : null,
+            reason: decision.appointment.ok ? 'ok' : decision.appointment.reason,
+          },
+          'booking decision'
+        );
+      }
+    } else {
+      // No conversation (persistence failed) — use LLM reply verbatim
+      finalReply = llmResult.reply;
+    }
+  } catch (e) {
     requestLog.error(
-      { err: (llmError as Error).message },
-      'LLM generation failed; using fallback reply'
+      { err: (e as Error).message },
+      'reply generation failed; using fallback'
     );
-    reply =
-      'Sorry, I am having trouble responding right now. Please try again in a moment.';
+    finalReply = fallback;
+    appointmentStatus = 'error';
   }
 
-  // Step 6: persist agent reply (best-effort)
-  if (conversationId && reply) {
+  // Step 7: persist final agent reply (best-effort)
+  if (conversationId) {
     try {
       await updateConversationState(conversationId, {
-        last_agent_msg: reply,
+        last_agent_msg: finalReply,
       });
       await touchConversation(conversationId);
     } catch (e) {
@@ -174,13 +211,19 @@ export async function handleIncomingMessage(
   }
 
   requestLog.info(
-    { replyLength: reply?.length ?? 0, conversationId, customerId },
+    {
+      replyLength: finalReply.length,
+      conversationId,
+      customerId,
+      appointment: appointmentStatus,
+    },
     'reply generated'
   );
 
   return {
-    reply,
+    reply: finalReply,
     conversationId,
     customerId,
+    appointment: appointmentStatus,
   };
 }
