@@ -1,0 +1,167 @@
+{
+  "info": {
+    "name": "Halo Owner Dashboard API",
+    "_postman_id": "halo-owner-dashboard-2026",
+    "description": "JWT-authenticated endpoints for the salon owner dashboard. All requests need `Authorization: Bearer {{token}}` and use `{{baseUrl}}` + path. Set `token` and `businessId` in the collection variables after first login.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {"key": "baseUrl", "value": "http://localhost:3000", "type": "string"},
+    {"key": "token", "value": "", "type": "string"},
+    {"key": "businessId", "value": "", "type": "string"},
+    {"key": "customerId", "value": "", "type": "string"},
+    {"key": "staffId", "value": "", "type": "string"},
+    {"key": "serviceId", "value": "", "type": "string"},
+    {"key": "appointmentId", "value": "", "type": "string"}
+  ],
+  "item": [
+    {
+      "name": "Auth — Onboard business (post-signup)",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"business_name\": \"FABS Beauty Lounge & Salon\",\n  \"city\": \"Islamabad\",\n  \"timezone\": \"Asia/Karachi\"\n}",
+          "options": {"raw": {"language": "json"}}
+        },
+        "url": {"raw": "{{baseUrl}}/api/auth/onboard-business", "host": ["{{baseUrl}}"], "path": ["api", "auth", "onboard-business"]}
+      }
+    },
+    {
+      "name": "Auth — Who am I (returns user + business)",
+      "request": {
+        "method": "GET",
+        "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+        "url": {"raw": "{{baseUrl}}/api/auth/me", "host": ["{{baseUrl}}"], "path": ["api", "auth", "me"]}
+      }
+    },
+    {
+      "name": "Today — list today's bookings",
+      "request": {
+        "method": "GET",
+        "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+        "url": {"raw": "{{baseUrl}}/api/business/{{businessId}}/today", "host": ["{{baseUrl}}"], "path": ["api", "business", "{{businessId}}", "today"]}
+      }
+    },
+    {
+      "name": "Bookings — by date",
+      "request": {
+        "method": "GET",
+        "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+        "url": {
+          "raw": "{{baseUrl}}/api/business/{{businessId}}/bookings?date=2026-07-24",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "business", "{{businessId}}", "bookings"],
+          "query": [{"key": "date", "value": "2026-07-24"}]
+        }
+      }
+    },
+    {
+      "name": "Appointment — reschedule / change status (PATCH)",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {"key": "Authorization", "value": "Bearer {{token}}"},
+          {"key": "Content-Type", "value": "application/json"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"status\": \"confirmed\",\n  \"start_time\": \"2026-07-24T11:00:00.000Z\",\n  \"end_time\": \"2026-07-24T11:30:00.000Z\"\n}",
+          "options": {"raw": {"language": "json"}}
+        },
+        "url": {"raw": "{{baseUrl}}/api/appointments/{{appointmentId}}", "host": ["{{baseUrl}}"], "path": ["api", "appointments", "{{appointmentId}}"]}
+      }
+    },
+    {
+      "name": "Staff — list (with service_ids)",
+      "request": {
+        "method": "GET",
+        "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+        "url": {"raw": "{{baseUrl}}/api/business/{{businessId}}/staff", "host": ["{{baseUrl}}"], "path": ["api", "business", "{{businessId}}", "staff"]}
+      }
+    },
+    {
+      "name": "Staff — add new (with initial skills)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "Authorization", "value": "Bearer {{token}}"},
+          {"key": "Content-Type", "value": "application/json"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Rabia Yousaf\",\n  \"phone\": \"923009876543\",\n  \"skill_service_ids\": []\n}",
+          "options": {"raw": {"language": "json"}}
+        },
+        "url": {"raw": "{{baseUrl}}/api/business/{{businessId}}/staff", "host": ["{{baseUrl}}"], "path": ["api", "business", "{{businessId}}", "staff"]}
+      }
+    },
+    {
+      "name": "Staff skills — replace (PATCH)",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {"key": "Authorization", "value": "Bearer {{token}}"},
+          {"key": "Content-Type", "value": "application/json"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"service_ids\": [\n    \"{{serviceId}}\",\n    \"{{serviceId}}\"\n  ]\n}",
+          "options": {"raw": {"language": "json"}}
+        },
+        "url": {"raw": "{{baseUrl}}/api/staff/{{staffId}}/skills", "host": ["{{baseUrl}}"], "path": ["api", "staff", "{{staffId}}", "skills"]}
+      }
+    },
+    {
+      "name": "Services — list (for pickers)",
+      "request": {
+        "method": "GET",
+        "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+        "url": {"raw": "{{baseUrl}}/api/business/{{businessId}}/services", "host": ["{{baseUrl}}"], "path": ["api", "business", "{{businessId}}", "services"]}
+      }
+    },
+    {
+      "name": "Services — add new",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "Authorization", "value": "Bearer {{token}}"},
+          {"key": "Content-Type", "value": "application/json"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Express blow-dry\",\n  \"duration_minutes\": 20,\n  \"staff_required\": 1,\n  \"price\": 500\n}",
+          "options": {"raw": {"language": "json"}}
+        },
+        "url": {"raw": "{{baseUrl}}/api/business/{{businessId}}/services", "host": ["{{baseUrl}}"], "path": ["api", "business", "{{businessId}}", "services"]}
+      }
+    },
+    {
+      "name": "Conversations — inbox",
+      "request": {
+        "method": "GET",
+        "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+        "url": {
+          "raw": "{{baseUrl}}/api/business/{{businessId}}/conversations?limit=50",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "business", "{{businessId}}", "conversations"],
+          "query": [{"key": "limit", "value": "50"}]
+        }
+      }
+    },
+    {
+      "name": "Demo — chat (no auth, smoke test)",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"business_id\": \"{{businessId}}\",\n  \"customer_phone\": \"923001234567\",\n  \"customer_name\": \"Test User\",\n  \"message\": \"Mujhe kal 3pm haircut chahiye\"\n}",
+          "options": {"raw": {"language": "json"}}
+        },
+        "url": {"raw": "{{baseUrl}}/demo/chat", "host": ["{{baseUrl}}"], "path": ["demo", "chat"]}
+      }
+    }
+  ]
+}

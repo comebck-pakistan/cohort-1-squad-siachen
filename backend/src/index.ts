@@ -9,8 +9,13 @@ import './config';
 
 import express from 'express';
 import path from 'path';
+import cors from 'cors';
 import webhookRouter from './routes/webhook';
 import demoRouter from './routes/demo';
+import authRouter from './routes/auth';
+import dashboardRouter from './routes/dashboard';
+import superadminRouter from './routes/superadmin';
+import onboardingRouter from './routes/onboarding';
 import { logger, childLogger } from './lib/logger';
 import { SessionManager } from './whatsapp-web/session-manager';
 import { createOnboardingRouter } from './whatsapp-web/qr-server';
@@ -56,6 +61,38 @@ const SESSIONS_ROOT =
 // ---------------------------------------------------------------------------
 
 const app = express();
+
+// ---------------------------------------------------------------------------
+// CORS — allow the Recepta frontend (and any localhost dev origin) to
+// call this API. The frontend sends Authorization: Bearer <jwt>, so we
+// must allow that header explicitly (cors's default allow-list covers
+// the common Content-Type/Accept but not custom headers).
+//
+// Permissive in dev (any localhost port); lock down to a single origin
+// list once we have a real production URL.
+// ---------------------------------------------------------------------------
+const ALLOWED_ORIGINS = [
+  'http://localhost:8080',
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:8080',
+  'http://127.0.0.1:5173',
+];
+app.use(
+  cors({
+    origin: (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
+      // Allow requests with no Origin (curl, server-to-server, Postman)
+      if (!origin) return cb(null, true);
+      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      // Production: also allow any *.recepta.pk if you add one later
+      // (kept simple for MVP — easy to harden when needed)
+      return cb(null, true); // permissive in dev
+    },
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  })
+);
 app.use(express.json());
 
 // Health endpoint — reports transport + per-salon session snapshot.
@@ -82,6 +119,18 @@ app.use('/demo', express.static(path.join(__dirname, '..', 'public')));
 
 // Demo chat route — always mounted, transport-agnostic.
 app.use(demoRouter);
+
+// Owner dashboard API — JWT auth + per-business scoping.
+// Auth routes (signup helper, /me) mounted at root /api/auth.
+app.use('/api', authRouter);
+// Dashboard CRUD at /api/business/... and /api/appointments/..., /api/staff/...
+app.use('/api', dashboardRouter);
+// Superadmin platform endpoints — /api/salons, /api/audit, /api/kpis, etc.
+app.use('/api', superadminRouter);
+// Onboarding status (used by Recepta's QR modal) — /onboarding/:id/status.
+// Mounted at root because the path is part of the URL space shared with
+// the QR server in whatsapp-web/qr-server.ts.
+app.use('/', onboardingRouter);
 
 // ---------------------------------------------------------------------------
 // Transport-specific setup

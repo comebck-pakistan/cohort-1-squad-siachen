@@ -1,13 +1,24 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  type ReactNode,
+} from "react";
+import { supabase } from "./supabase";
 
 // ---------------------------------------------------------------------------
-// Mock SuperAdmin auth. Simulates the eventual DB-backed flow: an admins
-// table + roles is checked on login. Persists the signed-in admin in
-// localStorage so refreshes keep the session. Swap MOCK_ADMINS for a real
-// POST /api/auth/login later without changing the component surface.
+// Real Supabase auth — replaces the MOCK_ADMINS flow that previously
+// lived here. The dashboard now actually signs the user in against
+// Supabase Auth, then reads profiles.role from the backend to decide
+// whether they get superadmin or salon-portal routes.
+//
+// Token storage: Supabase JS keeps the JWT + refresh token in localStorage
+// via its persistSession option (see supabase.ts). We expose getToken()
+// so api.ts can attach it as Authorization: Bearer on every backend call.
 // ---------------------------------------------------------------------------
 
-export type AdminRole = "superadmin" | "admin";
+export type AdminRole = "superadmin" | "business_owner" | "staff";
 
 export interface AdminUser {
   id: string;
@@ -16,74 +27,134 @@ export interface AdminUser {
   role: AdminRole;
 }
 
-interface StoredAdmin extends AdminUser {
-  password: string;
-}
-
-const MOCK_ADMINS: StoredAdmin[] = [
-  {
-    id: "u1",
-    name: "Marriyam Andeel",
-    email: "admin@recepta.pk",
-    password: "admin123",
-    role: "superadmin",
-  },
-  {
-    id: "u2",
-    name: "Bilal Khan",
-    email: "ops@recepta.pk",
-    password: "ops12345",
-    role: "admin",
-  },
-];
-
-const STORAGE_KEY = "recepta.admin.session";
-
 interface AuthState {
   user: AdminUser | null;
   isAuthenticated: boolean;
   isReady: boolean;
+  /** Real Supabase sign-in. Throws on bad credentials. */
   login: (email: string, password: string) => Promise<AdminUser>;
-  logout: () => void;
+  logout: () => Promise<void>;
+  /** Current access token (for api.ts to attach to requests). */
+  getToken: () => Promise<string | null>;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
+
+const ROLE_STORAGE_KEY = "recepta.admin.role";
+const NAME_STORAGE_KEY = "recepta.admin.name";
+
+/**
+ * Look up the caller's profile.role from our backend.
+ * Backend endpoint: GET /api/auth/me — returns user.role + business info.
+ * Falls back to a localStorage cache if backend is unreachable so the
+ * UI doesn't flicker on every refresh.
+ */
+async function fetchProfileFromBackend(token: string): Promise<{
+  role: AdminRole;
+  full_name: string | null;
+}> {
+  const API = (import.meta.env.VITE_API_URL as string) || "";
+  try {
+    const res = await fetch(`${API}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error(`Backend returned ${res.status}`);
+    const data = (await res.json()) as {
+      user?: { role?: string; full_name?: string | null };
+    };
+    const role = (data.user?.role as AdminRole) || "business_owner";
+    return { role, full_name: data.user?.full_name ?? null };
+  } catch {
+    // Fall back to whatever we cached last time
+    const cached = (typeof localStorage !== "undefined"
+      ? localStorage.getItem(ROLE_STORAGE_KEY)
+      : null) as AdminRole | null;
+    const cachedName =
+      typeof localStorage !== "undefined"
+        ? localStorage.getItem(NAME_STORAGE_KEY)
+        : null;
+    return { role: cached ?? "business_owner", full_name: cachedName };
+  }
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AdminUser | null>(null);
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) setUser(JSON.parse(raw) as AdminUser);
-    } catch {
-      // ignore malformed session
-    }
-    setIsReady(true);
+    let cancelled = false;
+    (async () => {
+      // Restore session from Supabase's localStorage on page load.
+      const { data } = await supabase().auth.getSession();
+      if (cancelled) return;
+      const session = data.session;
+      if (session?.user) {
+        const profile = await fetchProfileFromBackend(session.access_token);
+        const u: AdminUser = {
+          id: session.user.id,
+          email: session.user.email || "",
+          name: profile.full_name || session.user.email || "(user)",
+          role: profile.role,
+        };
+        setUser(u);
+        localStorage.setItem(ROLE_STORAGE_KEY, profile.role);
+        if (profile.full_name) localStorage.setItem(NAME_STORAGE_KEY, profile.full_name);
+      }
+      setIsReady(true);
+    })();
+
+    // Also subscribe to token refresh so user stays logged in across tabs.
+    const { data: sub } = supabase().auth.onAuthStateChange(
+      (_event: string, session: { user?: { id: string; email?: string } } | null) => {
+        if (cancelled) return;
+        if (!session?.user) {
+          setUser(null);
+        }
+      }
+    );
+
+    return () => {
+      cancelled = true;
+      sub.subscription.unsubscribe();
+    };
   }, []);
 
   const login = async (email: string, password: string): Promise<AdminUser> => {
-    // Simulate network round-trip to POST /api/auth/login
-    await new Promise((r) => setTimeout(r, 400));
-    const match = MOCK_ADMINS.find(
-      (u) => u.email.toLowerCase() === email.trim().toLowerCase() && u.password === password,
-    );
-    if (!match) throw new Error("Invalid email or password");
-    const { password: _pw, ...safe } = match;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
-    setUser(safe);
-    return safe;
+    const { data, error } = await supabase().auth.signInWithPassword({
+      email,
+      password,
+    });
+    if (error || !data.user || !data.session) {
+      throw new Error(error?.message || "Invalid email or password");
+    }
+    const profile = await fetchProfileFromBackend(data.session.access_token);
+    const u: AdminUser = {
+      id: data.user.id,
+      email: data.user.email || "",
+      name: profile.full_name || data.user.email || "(user)",
+      role: profile.role,
+    };
+    setUser(u);
+    localStorage.setItem(ROLE_STORAGE_KEY, profile.role);
+    if (profile.full_name) localStorage.setItem(NAME_STORAGE_KEY, profile.full_name);
+    return u;
   };
 
-  const logout = () => {
-    localStorage.removeItem(STORAGE_KEY);
+  const logout = async () => {
+    await supabase().auth.signOut();
     setUser(null);
+    localStorage.removeItem(ROLE_STORAGE_KEY);
+    localStorage.removeItem(NAME_STORAGE_KEY);
+  };
+
+  const getToken = async (): Promise<string | null> => {
+    const { data } = await supabase().auth.getSession();
+    return data.session?.access_token ?? null;
   };
 
   return (
     <AuthContext.Provider
-      value={{ user, isAuthenticated: !!user, isReady, login, logout }}
+      value={{ user, isAuthenticated: !!user, isReady, login, logout, getToken }}
     >
       {children}
     </AuthContext.Provider>
