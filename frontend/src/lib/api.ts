@@ -12,6 +12,64 @@ import type {
 import { supabase } from "./supabase";
 
 // ---------------------------------------------------------------------------
+// Per-business dashboard row types — shape mirrors backend endpoints added
+// in Phase 1 (backend/src/routes/dashboard.ts).
+// ---------------------------------------------------------------------------
+
+export interface StaffRow {
+  id: string;
+  name: string;
+  phone: string | null;
+  role: string | null;
+  working_days: string | null;
+  is_active: boolean;
+  created_at: string;
+  service_ids: string[];
+}
+
+export interface ServiceRow {
+  id: string;
+  name: string;
+  price: number;
+  duration_minutes: number;
+  category: string | null;
+  created_at: string;
+}
+
+export interface EscalationRow {
+  id: string;
+  conversation_id: string;
+  customer_name: string;
+  customer_phone: string;
+  reason: string;
+  rule_label: string;
+  rule_kind: string;
+  ai_draft: string | null;
+  resolved: boolean;
+  resolved_at: string | null;
+  created_at: string;
+}
+
+export interface DashboardStats {
+  kpis: {
+    bookings_handled: number;
+    conversations_processed: number;
+    resolution_rate: number;
+    revenue_pkr: number;
+  };
+  hourly: Array<{ h: string; c: number }>;
+  intents: Array<{ name: string; value: number; color: string }>;
+  feed: Array<{ text: string; tone: string; time: string }>;
+}
+
+export interface AIRules {
+  rules: string[];
+  triggers: { discounts: boolean; late: boolean; custom: boolean };
+  discountMode: "decline" | "promo";
+  latePolicy: string;
+}
+
+// ---------------------------------------------------------------------------
 // HTTP client — thin fetch wrapper hitting the halo-backend. Falls back to
 // deterministic mock data when the backend is not reachable so the dashboard
 // stays useful in the Lovable preview.
@@ -313,6 +371,91 @@ export const api = {
       status: "qr_ready",
       hasQR: true,
     })),
+  connectionInfo: (businessId: string) =>
+    withMock(`/api/business/${businessId}/connection-info`, () => ({
+      businessId,
+      phone_number_id_set: false,
+      qr_pairing_available: true,
+      agent_active: false,
+      instructions:
+        "Scan the QR code with your salon WhatsApp to start receiving customer messages.",
+      next_step: "scan_qr" as const,
+    })),
+  registerOnboarding: (businessId: string) =>
+    withMock(`/onboarding/${businessId}/register`, () => ({ ok: true }), {
+      method: "POST",
+    }),
+  onboardingPageUrl: (businessId: string) =>
+    `${BASE_URL}/onboarding/${businessId}`,
+
+  // ---- Phase 1 dashboard wiring (round-trip data) -----------------------
+
+  staff: (businessId: string) =>
+    withMock(`/api/business/${businessId}/staff`, () => ({ staff: [] as StaffRow[] })),
+
+  conversations: (businessId: string) =>
+    withMock(`/api/business/${businessId}/conversations`, () => ({
+      conversations: [] as Array<{
+        id: string;
+        status: string;
+        last_message_at: string;
+        created_at: string;
+        customer: { id: string; phone: string; name: string | null } | null;
+        state: {
+          current_intent: string | null;
+          last_customer_msg: string | null;
+          last_agent_msg: string | null;
+          outcome: string | null;
+        } | null;
+      }>,
+    })),
+
+  services: (businessId: string) =>
+    withMock(`/api/business/${businessId}/services`, () => ({
+      services: [] as ServiceRow[],
+    })),
+
+  dashboardStats: (businessId: string) =>
+    withMock(`/api/business/${businessId}/dashboard-stats`, () => ({
+      kpis: {
+        bookings_handled: 0,
+        conversations_processed: 0,
+        resolution_rate: 0,
+        revenue_pkr: 0,
+      },
+      hourly: [] as Array<{ h: string; c: number }>,
+      intents: [] as Array<{ name: string; value: number; color: string }>,
+      feed: [] as Array<{ text: string; tone: string; time: string }>,
+    })),
+
+  escalations: (businessId: string) =>
+    withMock(`/api/business/${businessId}/escalations`, () => ({
+      escalations: [] as EscalationRow[],
+    })),
+
+  aiRules: (businessId: string) =>
+    withMock(`/api/business/${businessId}/ai-rules`, () => ({
+      rules: [] as string[],
+      triggers: { discounts: true, late: true, custom: true },
+      discountMode: "promo" as "decline" | "promo",
+      latePolicy:
+        "If a customer is more than 15 minutes late, offer to reschedule or hold the slot for 5 more minutes.",
+    })),
+
+  updateAiRules: (
+    businessId: string,
+    body: {
+      rules: string[];
+      triggers: { discounts: boolean; late: boolean; custom: boolean };
+      discountMode: "decline" | "promo";
+      latePolicy: string;
+    },
+  ) =>
+    withMock(
+      `/api/business/${businessId}/ai-rules`,
+      () => body,
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
 };
 
 export const qk = {
@@ -324,4 +467,10 @@ export const qk = {
   tierLimits: ["settings", "tiers"] as const,
   safety: ["settings", "safety"] as const,
   onboarding: (id: string) => ["onboarding", id] as const,
+  staff: (id: string) => ["staff", id] as const,
+  conversations: (id: string) => ["conversations", id] as const,
+  services: (id: string) => ["services", id] as const,
+  dashboardStats: (id: string) => ["dashboard-stats", id] as const,
+  escalations: (id: string) => ["escalations", id] as const,
+  aiRules: (id: string) => ["ai-rules", id] as const,
 };

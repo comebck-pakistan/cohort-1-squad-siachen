@@ -1,5 +1,7 @@
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useTenantBusinessId } from "@/lib/useTenantBusinessId";
 import {
   LayoutDashboard,
   MessagesSquare,
@@ -15,6 +17,7 @@ import {
   Sparkles,
   LogOut,
   Menu,
+  Smartphone,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -28,12 +31,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { toast } from "sonner";
-
-const salons = [
-  { id: "s1", name: "Zubair's Grooming Loft", branch: "Lahore Branch" },
-  { id: "s2", name: "Zubair's Grooming Loft", branch: "DHA Karachi" },
-  { id: "s3", name: "Glow Studio", branch: "Gulberg" },
-];
 
 type NavItem = {
   to: string;
@@ -49,13 +46,8 @@ const nav: NavItem[] = [
   { to: "/salon-portal/escalations", label: "Edge Cases", icon: AlertTriangle, badge: 3 },
   { to: "/salon-portal/business", label: "Services & Staff", icon: Scissors },
   { to: "/salon-portal/ai-rules", label: "Agent Rules", icon: Bot },
+  { to: "/salon-portal/onboarding", label: "Connect WhatsApp", icon: Smartphone },
 ];
-
-const OWNER = {
-  name: "Marriyam Andeel",
-  email: "manager@salon.pk",
-  role: "Owner",
-};
 
 function initialsOf(name: string) {
   return name
@@ -67,16 +59,97 @@ function initialsOf(name: string) {
     .toUpperCase();
 }
 
+// Single-salon owners see one salon card; the dropdown becomes a label.
+// We still accept an array so multi-salon owners can be added later without
+// reshaping the JSX.
+const salonsFromIdentity = (id: string, name: string, city: string) => [
+  {
+    id: id || "self",
+    name: name || "Your salon",
+    branch: city || "",
+  },
+];
+
+const roleLabel = (role: string | undefined): string => {
+  switch (role) {
+    case "superadmin":
+      return "Superadmin";
+    case "business_owner":
+      return "Owner";
+    case "staff":
+      return "Staff";
+    default:
+      return "Owner";
+  }
+};
+
 export function TenantShell() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const navigate = useNavigate();
+  const tenant = useTenantBusinessId();
   const [agentOnline, setAgentOnline] = useState(true);
-  const [salon, setSalon] = useState(salons[0]);
   const [mobileOpen, setMobileOpen] = useState(false);
+
+  // Build a single-salon list from the identity so the existing JSX works
+  // without reshaping. Multi-salon support can plug in here later.
+  const identity = tenant.data;
+  const salons = identity
+    ? salonsFromIdentity(
+        identity.businessId,
+        identity.businessName,
+        identity.businessCity,
+      )
+    : [];
+  const [salon, setSalon] = useState(salons[0] ?? { id: "self", name: "Your salon", branch: "" });
+
+  // When the identity loads (or changes after a login), snap the active
+  // salon to the user's real one. Multi-salon users can still switch via
+  // the dropdown — only the default selection is forced.
+  useEffect(() => {
+    if (salons[0]) setSalon(salons[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [identity?.businessId]);
+
+  const ownerName = identity?.fullName || identity?.email || "Owner";
+  const ownerEmail = identity?.email || "";
+  const ownerRole = roleLabel(identity?.role);
 
   useEffect(() => {
     setMobileOpen(false);
   }, [pathname]);
+
+  // Brief loading shell while /api/auth/me resolves. Without this the user
+  // sees a "Your salon" placeholder flash before the real identity lands.
+  if (tenant.isLoading && !identity) {
+    return (
+      <div className="flex min-h-screen w-full items-center justify-center bg-[oklch(0.985_0.005_180)]">
+        <div className="flex items-center gap-3 text-sm text-muted-foreground">
+          <Skeleton className="size-4 rounded-full" />
+          Loading your salon…
+        </div>
+      </div>
+    );
+  }
+
+  if (tenant.isError && !identity) {
+    return (
+      <div className="flex min-h-screen w-full items-center justify-center bg-[oklch(0.985_0.005_180)] p-6">
+        <div className="max-w-md text-center">
+          <div className="text-base font-medium">Could not load your salon</div>
+          <div className="mt-1 text-sm text-muted-foreground">
+            {String(tenant.error?.message || "Unknown error")}
+          </div>
+          <button
+            type="button"
+            className="mt-4 inline-flex h-9 items-center rounded-md border px-3 text-sm hover:bg-muted"
+            onClick={() => tenant.refetch()}
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   function handleSignOut() {
     try {
@@ -207,19 +280,19 @@ export function TenantShell() {
             <DropdownMenuTrigger asChild>
               <button className="w-full flex items-center gap-3 rounded-lg p-2 hover:bg-muted/60 transition-colors text-left">
                 <div className="size-9 rounded-full bg-primary text-primary-foreground grid place-items-center text-xs font-semibold shrink-0">
-                  {initialsOf(OWNER.name)}
+                  {initialsOf(ownerName)}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="text-sm font-medium truncate">{OWNER.name}</div>
-                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground">{OWNER.role}</div>
+                  <div className="text-sm font-medium truncate">{ownerName}</div>
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground">{ownerRole}</div>
                 </div>
                 <ChevronDown className="size-4 text-muted-foreground shrink-0" />
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-60">
               <DropdownMenuLabel>
-                <div className="text-sm font-medium">{OWNER.name}</div>
-                <div className="text-xs text-muted-foreground font-normal">{OWNER.email}</div>
+                <div className="text-sm font-medium">{ownerName}</div>
+                <div className="text-xs text-muted-foreground font-normal">{ownerEmail}</div>
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={handleSignOut} className="text-destructive focus:text-destructive">
@@ -244,7 +317,7 @@ export function TenantShell() {
           </button>
 
           <div className="hidden md:block text-sm text-muted-foreground">
-            Good morning, <span className="font-medium text-foreground">{OWNER.name.split(" ")[0]}</span>.
+            Good morning, <span className="font-medium text-foreground">{ownerName.split(" ")[0]}</span>.
             Your AI agent is currently {agentOnline ? "online" : "paused"}.
           </div>
 
@@ -268,13 +341,13 @@ export function TenantShell() {
                   className="size-9 rounded-full bg-primary text-primary-foreground grid place-items-center text-xs font-semibold hover:opacity-90"
                   aria-label="Account menu"
                 >
-                  {initialsOf(OWNER.name)}
+                  {initialsOf(ownerName)}
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
                 <DropdownMenuLabel>
-                  <div className="text-sm font-medium">{OWNER.name}</div>
-                  <div className="text-xs text-muted-foreground font-normal">{OWNER.email}</div>
+                  <div className="text-sm font-medium">{ownerName}</div>
+                  <div className="text-xs text-muted-foreground font-normal">{ownerEmail}</div>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={handleSignOut} className="text-destructive focus:text-destructive">

@@ -1,11 +1,15 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import { api, qk } from "@/lib/api";
+import { useTenantBusinessId } from "@/lib/useTenantBusinessId";
 import {
   Search,
   Send,
@@ -15,110 +19,118 @@ import {
   CreditCard,
   CheckCircle2,
   Phone,
+  MessagesSquare,
 } from "lucide-react";
 
-type Sender = "customer" | "ai" | "staff";
+// ---------------------------------------------------------------------------
+// /salon-portal/inbox — Conversations tab
+//
+// Conversations list comes from GET /api/business/:id/conversations (real
+// Supabase data joined with customers + conversation_state). The chat
+// thread for the selected conversation is rebuilt from the last_customer_msg
+// + last_agent_msg snapshot in conversation_state — we don't yet have a
+// "full thread" endpoint, so this is intentionally a 2-message preview
+// until that lands. Empty states are honest ("no conversations yet") so
+// fresh signups don't see fake Ayesha / Hassan / Sana entries.
+// ---------------------------------------------------------------------------
 
-type Convo = {
+type Intent = "Booking Request" | "Price Inquiry" | "Escalation" | "Timings" | "Other";
+
+const intentColor: Record<Intent, string> = {
+  "Booking Request": "bg-success-soft text-[oklch(0.35_0.12_145)] border-transparent",
+  "Price Inquiry": "bg-accent text-accent-foreground border-transparent",
+  Escalation: "bg-danger-soft text-[oklch(0.4_0.18_27)] border-transparent",
+  Timings: "bg-warning-soft text-[oklch(0.35_0.1_70)] border-transparent",
+  Other: "bg-muted text-muted-foreground border-transparent",
+};
+
+function classifyIntent(raw: string | null | undefined): Intent {
+  const r = (raw || "").toLowerCase();
+  if (r.includes("book")) return "Booking Request";
+  if (r.includes("price") || r.includes("cost")) return "Price Inquiry";
+  if (r.includes("escalat")) return "Escalation";
+  if (r.includes("time") || r.includes("hour") || r.includes("location")) return "Timings";
+  return "Other";
+}
+
+function bucketFromStatus(status: string | undefined): "active" | "human" | "done" {
+  if (!status) return "active";
+  if (status === "active") return "active";
+  if (status === "human_takeover" || status === "human") return "human";
+  return "done";
+}
+
+function fmtTimeAgo(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const ms = Date.now() - new Date(iso).getTime();
+  const min = Math.round(ms / 60_000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min}m`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h`;
+  return `${Math.round(hr / 24)}d`;
+}
+
+interface NormalizedConvo {
   id: string;
   name: string;
   phone: string;
   snippet: string;
   time: string;
-  intent: "Booking Request" | "Price Inquiry" | "Escalation" | "Timings";
+  intent: Intent;
   bucket: "active" | "human" | "done";
-  slots: { service?: string; date?: string; staff?: string; name?: string };
-  messages: { from: Sender; text: string; time: string }[];
-};
-
-const CONVOS: Convo[] = [
-  {
-    id: "c1",
-    name: "Ayesha K.",
-    phone: "+92 300 1234567",
-    snippet: "Yes tomorrow 4 PM works, with Ali please",
-    time: "2m",
-    intent: "Booking Request",
-    bucket: "active",
-    slots: { name: "Ayesha K.", service: "Haircut", date: "Tomorrow 4:00 PM", staff: "Ali" },
-    messages: [
-      { from: "customer", text: "Hi, I want to book a haircut", time: "3:12 PM" },
-      { from: "ai", text: "Hi Ayesha! Sure — we have Ali and Sara available tomorrow. Any time preference?", time: "3:12 PM" },
-      { from: "customer", text: "4 PM with Ali", time: "3:14 PM" },
-      { from: "ai", text: "Perfect, booking a Haircut with Ali tomorrow at 4:00 PM. Shall I confirm?", time: "3:14 PM" },
-      { from: "customer", text: "Yes please", time: "3:15 PM" },
-    ],
-  },
-  {
-    id: "c2",
-    name: "Hassan R.",
-    phone: "+92 321 5551122",
-    snippet: "Your prices are ridiculous, worst salon",
-    time: "12m",
-    intent: "Escalation",
-    bucket: "human",
-    slots: { name: "Hassan R." },
-    messages: [
-      { from: "customer", text: "What do you charge for beard trim?", time: "2:45 PM" },
-      { from: "ai", text: "Beard trim is PKR 800.", time: "2:45 PM" },
-      { from: "customer", text: "That's outrageous, worst salon in Lahore", time: "2:47 PM" },
-    ],
-  },
-  {
-    id: "c3",
-    name: "Sana M.",
-    phone: "+92 345 9998877",
-    snippet: "How much is a manicure?",
-    time: "24m",
-    intent: "Price Inquiry",
-    bucket: "active",
-    slots: { name: "Sana M." },
-    messages: [
-      { from: "customer", text: "How much is a manicure?", time: "2:30 PM" },
-      { from: "ai", text: "Classic manicure is PKR 1,500 (30 mins). Would you like to book?", time: "2:30 PM" },
-    ],
-  },
-  {
-    id: "c4",
-    name: "Fatima Z.",
-    phone: "+92 300 4443322",
-    snippet: "Confirmed — see you Saturday",
-    time: "1h",
-    intent: "Booking Request",
-    bucket: "done",
-    slots: { name: "Fatima Z.", service: "Facial", date: "Sat 11:00 AM", staff: "Sara" },
-    messages: [
-      { from: "customer", text: "Book facial Saturday morning", time: "1:14 PM" },
-      { from: "ai", text: "Booked: Facial with Sara, Saturday 11:00 AM.", time: "1:14 PM" },
-      { from: "customer", text: "Confirmed — see you Saturday", time: "1:15 PM" },
-    ],
-  },
-];
-
-const intentColor: Record<Convo["intent"], string> = {
-  "Booking Request": "bg-success-soft text-[oklch(0.35_0.12_145)] border-transparent",
-  "Price Inquiry": "bg-accent text-accent-foreground border-transparent",
-  Escalation: "bg-danger-soft text-[oklch(0.4_0.18_27)] border-transparent",
-  Timings: "bg-warning-soft text-[oklch(0.35_0.1_70)] border-transparent",
-};
+  lastCustomer: string | null;
+  lastAgent: string | null;
+}
 
 export function TenantInbox() {
+  const tenant = useTenantBusinessId();
+  const businessId = tenant.data?.businessId ?? "";
+
+  const convosQ = useQuery({
+    queryKey: businessId
+      ? qk.conversations(businessId)
+      : ["conversations", "none"],
+    queryFn: () => api.conversations(businessId),
+    enabled: !!businessId,
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+  });
+
+  const raw = convosQ.data?.conversations ?? [];
+  const convos: NormalizedConvo[] = raw.map((c) => {
+    const intent = classifyIntent(c.state?.current_intent);
+    return {
+      id: c.id,
+      name: c.customer?.name || c.customer?.phone || "Unknown",
+      phone: c.customer?.phone || "",
+      snippet: c.state?.last_customer_msg || c.state?.last_agent_msg || "—",
+      time: fmtTimeAgo(c.last_message_at),
+      intent,
+      bucket: bucketFromStatus(c.status),
+      lastCustomer: c.state?.last_customer_msg ?? null,
+      lastAgent: c.state?.last_agent_msg ?? null,
+    };
+  });
+
   const [tab, setTab] = useState<"active" | "human" | "done">("active");
   const [query, setQuery] = useState("");
-  const [activeId, setActiveId] = useState<string>("c1");
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [takenOver, setTakenOver] = useState<Record<string, boolean>>({});
 
-  const list = CONVOS.filter(
+  // Pick first matching conversation as the active one when the list loads.
+  const filtered = convos.filter(
     (c) =>
       c.bucket === tab &&
       (query === "" ||
         c.name.toLowerCase().includes(query.toLowerCase()) ||
         c.phone.includes(query)),
   );
-  const active = CONVOS.find((c) => c.id === activeId) ?? CONVOS[0];
-  const isTakenOver = !!takenOver[active.id];
-  const humanCount = CONVOS.filter((c) => c.bucket === "human").length;
+  const active =
+    convos.find((c) => c.id === activeId) ?? filtered[0] ?? null;
+  const isTakenOver = active ? !!takenOver[active.id] : false;
+  const humanCount = convos.filter((c) => c.bucket === "human").length;
 
   return (
     <div className="h-[calc(100vh-4rem)] grid grid-cols-1 lg:grid-cols-[320px_1fr_320px] bg-[oklch(0.985_0.003_200)]">
@@ -151,17 +163,31 @@ export function TenantInbox() {
           </Tabs>
         </div>
         <div className="flex-1 overflow-y-auto">
-          {list.length === 0 ? (
-            <div className="p-6 text-center text-sm text-muted-foreground">No conversations.</div>
+          {convosQ.isLoading ? (
+            <ul className="divide-y">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <li key={i} className="px-4 py-3 space-y-2">
+                  <Skeleton className="h-3 w-24" />
+                  <Skeleton className="h-3 w-32" />
+                  <Skeleton className="h-3 w-full" />
+                </li>
+              ))}
+            </ul>
+          ) : filtered.length === 0 ? (
+            <div className="p-6 text-center text-sm text-muted-foreground">
+              {convos.length === 0
+                ? "No conversations yet. Once customers message your WhatsApp, they show up here."
+                : "No conversations in this view."}
+            </div>
           ) : (
             <ul className="divide-y">
-              {list.map((c) => (
+              {filtered.map((c) => (
                 <li key={c.id}>
                   <button
                     onClick={() => setActiveId(c.id)}
                     className={cn(
                       "w-full text-left px-4 py-3 hover:bg-muted/60 transition-colors",
-                      activeId === c.id && "bg-primary/5 border-l-2 border-primary",
+                      active?.id === c.id && "bg-primary/5 border-l-2 border-primary",
                     )}
                   >
                     <div className="flex items-center justify-between gap-2">
@@ -185,67 +211,95 @@ export function TenantInbox() {
 
       {/* Chat thread */}
       <div className="flex flex-col min-h-0 bg-white border-r">
-        <div className="p-4 border-b flex items-center justify-between gap-4 flex-wrap">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-sm font-semibold">
-              <Phone className="size-4 text-muted-foreground" />
-              {active.phone}
-            </div>
-            <div className="text-xs text-muted-foreground">{active.name}</div>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {active.slots.service && (
-                <Badge variant="outline" className="text-[10px]">Service: {active.slots.service}</Badge>
-              )}
-              {active.slots.date && (
-                <Badge variant="outline" className="text-[10px]">Date: {active.slots.date}</Badge>
-              )}
-              {active.slots.staff && (
-                <Badge variant="outline" className="text-[10px]">Staff: {active.slots.staff}</Badge>
-              )}
+        {!active ? (
+          <div className="flex-1 grid place-items-center p-6 text-center text-sm text-muted-foreground">
+            <div>
+              <MessagesSquare className="size-10 mx-auto mb-3 opacity-40" />
+              <div className="font-medium text-foreground">No conversation selected</div>
+              <div className="mt-1">Pick one from the inbox, or wait for a customer to message your WhatsApp.</div>
             </div>
           </div>
-          <Button
-            onClick={() => setTakenOver((s) => ({ ...s, [active.id]: !s[active.id] }))}
-            variant={isTakenOver ? "outline" : "default"}
-            className={!isTakenOver ? "bg-primary hover:bg-primary/90" : ""}
-          >
-            <UserCog className="size-4" />
-            {isTakenOver ? "Return to AI" : "Take Over Chat"}
-          </Button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-6 space-y-3">
-          {active.messages.map((m, i) => (
-            <MessageBubble key={i} msg={m} />
-          ))}
-          {isTakenOver && (
-            <div className="text-center">
-              <Badge className="bg-warning-soft text-[oklch(0.35_0.1_70)] border-transparent">
-                AI paused — you are replying manually
-              </Badge>
+        ) : (
+          <>
+            <div className="p-4 border-b flex items-center justify-between gap-4 flex-wrap">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 text-sm font-semibold">
+                  <Phone className="size-4 text-muted-foreground" />
+                  {active.phone || "—"}
+                </div>
+                <div className="text-xs text-muted-foreground">{active.name}</div>
+              </div>
+              <Button
+                onClick={() => setTakenOver((s) => ({ ...s, [active.id]: !s[active.id] }))}
+                variant={isTakenOver ? "outline" : "default"}
+                className={!isTakenOver ? "bg-primary hover:bg-primary/90" : ""}
+              >
+                <UserCog className="size-4" />
+                {isTakenOver ? "Return to AI" : "Take Over Chat"}
+              </Button>
             </div>
-          )}
-        </div>
 
-        <div className="p-4 border-t bg-background/50">
-          <div className="flex items-end gap-2">
-            <Textarea
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              placeholder={isTakenOver ? "Type your reply to the customer…" : "Take over to send a manual reply"}
-              disabled={!isTakenOver}
-              className="min-h-11 max-h-32 resize-none bg-white"
-            />
-            <Button
-              disabled={!isTakenOver || !draft.trim()}
-              onClick={() => setDraft("")}
-              className="bg-primary hover:bg-primary/90"
-            >
-              <Send className="size-4" />
-              Send
-            </Button>
-          </div>
-        </div>
+            <div className="flex-1 overflow-y-auto p-6 space-y-3">
+              {active.lastCustomer && (
+                <div className="flex justify-start">
+                  <div className="max-w-[75%]">
+                    <div className="rounded-2xl rounded-tl-sm bg-muted text-foreground px-4 py-2 text-sm">
+                      {active.lastCustomer}
+                    </div>
+                    <div className="mt-1 text-[10px] text-muted-foreground">{active.time}</div>
+                  </div>
+                </div>
+              )}
+              {active.lastAgent && (
+                <div className="flex justify-end">
+                  <div className="max-w-[75%]">
+                    <div className="rounded-2xl rounded-tr-sm bg-primary text-primary-foreground px-4 py-2 text-sm">
+                      {active.lastAgent}
+                    </div>
+                    <div className="mt-1 flex items-center justify-end gap-1.5 text-[10px] text-muted-foreground">
+                      <Badge className="bg-primary/10 text-primary border-transparent h-4 px-1.5 text-[9px]">
+                        <Bot className="size-2.5" /> AI
+                      </Badge>
+                      {active.time}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {!active.lastCustomer && !active.lastAgent && (
+                <div className="text-center text-sm text-muted-foreground py-6">
+                  No messages yet for this conversation.
+                </div>
+              )}
+              {isTakenOver && (
+                <div className="text-center">
+                  <Badge className="bg-warning-soft text-[oklch(0.35_0.1_70)] border-transparent">
+                    AI paused — you are replying manually
+                  </Badge>
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 border-t bg-background/50">
+              <div className="flex items-end gap-2">
+                <Textarea
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder={isTakenOver ? "Type your reply to the customer…" : "Take over to send a manual reply"}
+                  disabled={!isTakenOver}
+                  className="min-h-11 max-h-32 resize-none bg-white"
+                />
+                <Button
+                  disabled={!isTakenOver || !draft.trim()}
+                  onClick={() => setDraft("")}
+                  className="bg-primary hover:bg-primary/90"
+                >
+                  <Send className="size-4" />
+                  Send
+                </Button>
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Context panel */}
@@ -254,11 +308,11 @@ export function TenantInbox() {
           <h3 className="text-sm font-semibold">Extracted Details</h3>
           <p className="text-xs text-muted-foreground">Auto-captured by the AI agent.</p>
           <dl className="mt-4 space-y-3 text-sm">
-            <Row label="Name" value={active.slots.name ?? "—"} />
-            <Row label="Service" value={active.slots.service ?? "—"} />
-            <Row label="Date" value={active.slots.date?.split(" ").slice(0, -2).join(" ") ?? "—"} />
-            <Row label="Time" value={active.slots.date?.split(" ").slice(-2).join(" ") ?? "—"} />
-            <Row label="Staff" value={active.slots.staff ?? "—"} />
+            <Row label="Name" value={active?.name ?? "—"} />
+            <Row label="Phone" value={active?.phone ?? "—"} />
+            <Row label="Intent" value={active?.intent ?? "—"} />
+            <Row label="Status" value={active?.bucket ?? "—"} />
+            <Row label="Last activity" value={active?.time ?? "—"} />
           </dl>
         </div>
         <div className="p-5 space-y-2">
@@ -283,49 +337,6 @@ function Row({ label, value }: { label: string; value: string }) {
     <div className="flex items-start justify-between gap-3">
       <dt className="text-xs uppercase tracking-wide text-muted-foreground">{label}</dt>
       <dd className="text-sm font-medium text-right">{value}</dd>
-    </div>
-  );
-}
-
-function MessageBubble({ msg }: { msg: { from: Sender; text: string; time: string } }) {
-  if (msg.from === "customer") {
-    return (
-      <div className="flex justify-start">
-        <div className="max-w-[75%]">
-          <div className="rounded-2xl rounded-tl-sm bg-muted text-foreground px-4 py-2 text-sm">
-            {msg.text}
-          </div>
-          <div className="mt-1 text-[10px] text-muted-foreground">{msg.time}</div>
-        </div>
-      </div>
-    );
-  }
-  const isAI = msg.from === "ai";
-  return (
-    <div className="flex justify-end">
-      <div className="max-w-[75%]">
-        <div
-          className={cn(
-            "rounded-2xl rounded-tr-sm px-4 py-2 text-sm",
-            isAI ? "bg-primary text-primary-foreground" : "bg-[oklch(0.32_0.08_255)] text-white",
-          )}
-        >
-          {msg.text}
-        </div>
-        <div className="mt-1 flex items-center justify-end gap-1.5 text-[10px] text-muted-foreground">
-          <Badge
-            className={cn(
-              "h-4 px-1.5 text-[9px] border-transparent",
-              isAI
-                ? "bg-primary/10 text-primary"
-                : "bg-[oklch(0.32_0.08_255)]/10 text-[oklch(0.32_0.08_255)]",
-            )}
-          >
-            {isAI ? <><Bot className="size-2.5" /> AI</> : <><UserCog className="size-2.5" /> Staff</>}
-          </Badge>
-          {msg.time}
-        </div>
-      </div>
     </div>
   );
 }
