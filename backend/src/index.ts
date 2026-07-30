@@ -16,9 +16,8 @@ import authRouter from './routes/auth';
 import dashboardRouter from './routes/dashboard';
 import superadminRouter from './routes/superadmin';
 import onboardingRouter from './routes/onboarding';
+import bridgeRouter from './routes/bridge';
 import { logger, childLogger } from './lib/logger';
-import { SessionManager } from './whatsapp-web/session-manager';
-import { createOnboardingRouter } from './whatsapp-web/qr-server';
 
 // ---------------------------------------------------------------------------
 // Halo backend entry point.
@@ -104,12 +103,8 @@ app.get('/health', (_req, res) => {
     transport: TRANSPORT,
     uptime_seconds: Math.round(process.uptime()),
     node_env: process.env.NODE_ENV ?? 'development',
+    bridge_url: process.env.BRIDGE_URL ?? null,
   };
-
-  if (sessionManager) {
-    body.sessions = sessionManager.getStatusSnapshot();
-    body.session_count = sessionManager.size;
-  }
 
   res.json(body);
 });
@@ -127,16 +122,24 @@ app.use('/api', authRouter);
 app.use('/api', dashboardRouter);
 // Superadmin platform endpoints — /api/salons, /api/audit, /api/kpis, etc.
 app.use('/api', superadminRouter);
-// Onboarding status (used by Recepta's QR modal) — /onboarding/:id/status.
-// Mounted at root because the path is part of the URL space shared with
-// the QR server in whatsapp-web/qr-server.ts.
+// Service-to-service endpoints for the bridge service (Phase 1). The router
+// is token-gated inside routes/bridge.ts; we mount it here so /api/bridge/*
+// becomes reachable. Used by bridge/src/bridge-client.ts for active-businesses
+// discovery and inbound-message delivery.
+app.use('/api', bridgeRouter);
+// Onboarding proxy — /onboarding/:id/* is forwarded to the bridge service
+// (Phase 1). Mounted at root because the path is part of the URL space shared
+// with the bridge's own QR server.
 app.use('/', onboardingRouter);
 
 // ---------------------------------------------------------------------------
 // Transport-specific setup
+//
+// Phase 1: the in-process web transport (SessionManager / chromium lifecycle)
+// has been moved to the separate bridge service. The backend is now stateless
+// w.r.t. WhatsApp-web — it proxies /onboarding/* requests to the bridge and
+// only mounts /webhook for the Meta Cloud transport.
 // ---------------------------------------------------------------------------
-
-let sessionManager: SessionManager | null = null;
 
 if (TRANSPORT === 'cloud') {
   // Meta Cloud API. /webhook receives messages from Meta; /webhook GET
@@ -146,36 +149,18 @@ if (TRANSPORT === 'cloud') {
 }
 
 if (TRANSPORT === 'web') {
-  // whatsapp-web.js. Each salon opens a Chromium session linked via QR.
-  // Messages flow through library events, NOT HTTP — so no /webhook
-  // route is mounted. QR + status endpoints ARE mounted so salon owners
-  // can complete onboarding in their browser.
-  sessionManager = new SessionManager({ sessionsRoot: SESSIONS_ROOT });
-  app.use(createOnboardingRouter(sessionManager));
-  log.info(
-    { sessionsRoot: SESSIONS_ROOT },
-    'transport: web (whatsapp-web.js)'
+  log.warn(
+    { transport: TRANSPORT },
+    'WHATSAPP_TRANSPORT=web is now handled by the bridge service; backend is transport-agnostic. Set BRIDGE_URL and start bridge/ instead.'
   );
 }
 
 // ---------------------------------------------------------------------------
-// HTTP server + session manager startup
+// HTTP server
 // ---------------------------------------------------------------------------
 
 const server = app.listen(PORT, () => {
   log.info({ port: PORT, transport: TRANSPORT }, 'halo backend listening');
-
-  if (sessionManager) {
-    // Start the session manager AFTER the HTTP server is listening,
-    // because the QR server is already accepting requests at this point.
-    sessionManager.start().catch((e) => {
-      log.fatal(
-        { err: (e as Error).message },
-        'session manager failed to start; exiting'
-      );
-      process.exit(1);
-    });
-  }
 });
 
 // ---------------------------------------------------------------------------
@@ -183,10 +168,9 @@ const server = app.listen(PORT, () => {
 //
 // Sequence:
 //   1. Stop accepting new HTTP connections (server.close)
-//   2. Tear down every whatsapp-web.js Client (closes Chromium)
-//   3. Exit cleanly
+//   2. Exit cleanly
 //
-// Bounded by SHUTDOWN_TIMEOUT_MS so a stuck Chromium doesn't hold up
+// Bounded by SHUTDOWN_TIMEOUT_MS so a stuck request doesn't hold up
 // container orchestration (Docker gives ~30s before SIGKILL).
 // ---------------------------------------------------------------------------
 
@@ -217,17 +201,6 @@ async function shutdown(signal: string, exitCode = 0): Promise<void> {
       resolve();
     });
   });
-
-  if (sessionManager) {
-    try {
-      await sessionManager.shutdown();
-    } catch (e) {
-      log.error(
-        { err: (e as Error).message },
-        'session manager shutdown error (continuing)'
-      );
-    }
-  }
 
   clearTimeout(forceTimer);
   log.info({ signal }, 'shutdown complete');

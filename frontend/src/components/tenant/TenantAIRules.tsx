@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
@@ -8,6 +9,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { toast } from "sonner";
 import {
   Sheet,
   SheetContent,
@@ -16,17 +18,35 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
-import { FlaskConical, Plus, Send, Trash2, Bot, User } from "lucide-react";
+import {
+  FlaskConical,
+  Plus,
+  Send,
+  Trash2,
+  Bot,
+  User,
+  Save,
+} from "lucide-react";
+import { api, qk } from "@/lib/api";
+import { useTenantBusinessId } from "@/lib/useTenantBusinessId";
 
 export function TenantAIRules() {
+  const tenant = useTenantBusinessId();
+  const businessId = tenant.data?.businessId ?? "";
+  const qc = useQueryClient();
+
+  // Load saved rules from backend on mount; falls back to safe defaults if
+  // the business row has never been edited.
+  const rulesQ = useQuery({
+    queryKey: businessId ? qk.aiRules(businessId) : ["ai-rules", "none"],
+    queryFn: () => api.aiRules(businessId),
+    enabled: !!businessId,
+    staleTime: 60_000,
+  });
+
   const [discountMode, setDiscountMode] = useState<"decline" | "promo">("promo");
-  const [latePolicy, setLatePolicy] = useState(
-    "Inform them we hold appointments for 15 minutes maximum. After that, they must rebook.",
-  );
-  const [rules, setRules] = useState<string[]>([
-    "Always mention we have free parking in the rear",
-    "Recommend Sunday appointments for less crowded slots",
-  ]);
+  const [latePolicy, setLatePolicy] = useState("");
+  const [rules, setRules] = useState<string[]>([]);
   const [newRule, setNewRule] = useState("");
   const [triggers, setTriggers] = useState({
     complaint: true,
@@ -37,6 +57,39 @@ export function TenantAIRules() {
   });
   const [enabled, setEnabled] = useState({ discounts: true, late: true, custom: true });
 
+  // Sync fetched rules into local form state on first successful load.
+  useEffect(() => {
+    const r = rulesQ.data;
+    if (!r) return;
+    setRules(r.rules);
+    setDiscountMode(r.discountMode);
+    setLatePolicy(r.latePolicy);
+    setEnabled({
+      discounts: r.triggers.discounts,
+      late: r.triggers.late,
+      custom: r.triggers.custom,
+    });
+  }, [rulesQ.data]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.updateAiRules(businessId, {
+        rules,
+        triggers: {
+          discounts: enabled.discounts,
+          late: enabled.late,
+          custom: enabled.custom,
+        },
+        discountMode,
+        latePolicy,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.aiRules(businessId) });
+      toast.success("AI rules saved");
+    },
+    onError: (e) => toast.error((e as Error).message || "Save failed"),
+  });
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-start justify-between gap-4">
@@ -46,7 +99,17 @@ export function TenantAIRules() {
             Salon-specific behavior. Test changes in the sandbox before saving.
           </p>
         </div>
-        <Sandbox />
+        <div className="flex items-center gap-2">
+          <Button
+            onClick={() => save.mutate()}
+            disabled={save.isPending || rulesQ.isLoading}
+            className="bg-primary hover:bg-primary/90"
+          >
+            <Save className="size-4" />
+            {save.isPending ? "Saving…" : "Save rules"}
+          </Button>
+          <Sandbox />
+        </div>
       </div>
 
       <section className="space-y-4">

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
@@ -6,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Select,
   SelectContent,
@@ -32,6 +34,8 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Plus, Trash2, CalendarX } from "lucide-react";
+import { api, qk } from "@/lib/api";
+import { useTenantBusinessId } from "@/lib/useTenantBusinessId";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const HOURS = Array.from({ length: 24 }, (_, h) => `${String(h).padStart(2, "0")}:00`);
@@ -45,36 +49,16 @@ type ServiceRow = {
   active: boolean;
 };
 
-const seedServices: ServiceRow[] = [
-  { id: "s1", name: "Haircut", duration: 30, price: 1500, category: "Hair", active: true },
-  { id: "s2", name: "Classic Facial", duration: 60, price: 3500, category: "Skin", active: true },
-  { id: "s3", name: "Gel Manicure", duration: 45, price: 2000, category: "Nails", active: true },
-  { id: "s4", name: "Beard Trim", duration: 20, price: 800, category: "Hair", active: false },
-];
-
-const seedStaff = [
-  {
-    id: "st1",
-    name: "Ali Raza",
-    role: "Senior Stylist",
-    specs: ["Hair", "Beard"],
-    days: "Mon–Sat",
-  },
-  {
-    id: "st2",
-    name: "Sara Ahmed",
-    role: "Esthetician",
-    specs: ["Facial", "Skin"],
-    days: "Tue–Sun",
-  },
-  {
-    id: "st3",
-    name: "Zainab N.",
-    role: "Nail Technician",
-    specs: ["Manicure", "Pedicure"],
-    days: "Wed–Sun",
-  },
-];
+// Empty seed — services now come from GET /api/business/:id/services.
+// Until the first row arrives the table renders an empty state.
+const seedServices: ServiceRow[] = [];
+const seedStaff: Array<{
+  id: string;
+  name: string;
+  role: string;
+  specs: string[];
+  days: string;
+}> = [];
 
 export function TenantBusiness() {
   return (
@@ -257,8 +241,34 @@ function TimeSelect({
 }
 
 function ServicesTab() {
-  const [rows, setRows] = useState(seedServices);
+  const tenant = useTenantBusinessId();
+  const businessId = tenant.data?.businessId ?? "";
+  const servicesQ = useQuery({
+    queryKey: businessId ? qk.services(businessId) : ["services", "none"],
+    queryFn: () => api.services(businessId),
+    enabled: !!businessId,
+    staleTime: 60_000,
+  });
+  const [rows, setRows] = useState<ServiceRow[]>(seedServices);
   const [open, setOpen] = useState(false);
+
+  // Sync API services into local state on first load. We keep local state so
+  // the optimistic "Add" button keeps working without round-tripping each time.
+  useEffect(() => {
+    const list = servicesQ.data?.services;
+    if (!list || list.length === 0) return;
+    setRows(
+      list.map((s) => ({
+        id: s.id,
+        name: s.name,
+        duration: s.duration_minutes,
+        price: s.price,
+        category: ((s.category as ServiceRow["category"]) || "Hair"),
+        active: true,
+      })),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [servicesQ.data?.services?.length]);
   const [form, setForm] = useState({
     name: "",
     price: "",
@@ -414,9 +424,33 @@ type StaffRow = {
 };
 
 function StaffTab() {
-  const [rows, setRows] = useState<StaffRow[]>(seedStaff);
+  const tenant = useTenantBusinessId();
+  const businessId = tenant.data?.businessId ?? "";
+  const staffQ = useQuery({
+    queryKey: businessId ? qk.staff(businessId) : ["staff", "none"],
+    queryFn: () => api.staff(businessId),
+    enabled: !!businessId,
+    staleTime: 60_000,
+  });
+  const [rows, setRows] = useState<StaffRow[]>(seedStaff as StaffRow[]);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ name: "", role: "", specs: "", days: "" });
+
+  // Sync API staff into local state on first load.
+  useEffect(() => {
+    const list = staffQ.data?.staff;
+    if (!list || list.length === 0) return;
+    setRows(
+      list.map((s) => ({
+        id: s.id,
+        name: s.name,
+        role: s.role || "",
+        specs: [],
+        days: s.working_days || "",
+      })),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [staffQ.data?.staff?.length]);
 
   function add() {
     if (!form.name || !form.role) return;

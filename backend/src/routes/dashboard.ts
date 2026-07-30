@@ -9,9 +9,16 @@
 //   GET    /api/business/:businessId/bookings?date=YYYY-MM-DD
 //   PATCH  /api/appointments/:id          (status | reschedule)
 //   POST   /api/business/:businessId/staff
+//   GET    /api/business/:businessId/staff               (Phase 1 dashboard wiring)
 //   PATCH  /api/staff/:staffId/skills     (replace staff_skills with new set)
 //   POST   /api/business/:businessId/services
+//   GET    /api/business/:businessId/services            (Phase 1 dashboard wiring)
 //   GET    /api/business/:businessId/conversations
+//   GET    /api/business/:businessId/escalations         (Phase 1 dashboard wiring)
+//   GET    /api/business/:businessId/dashboard-stats     (Phase 1 dashboard wiring)
+//   GET    /api/business/:businessId/ai-rules            (Phase 1 dashboard wiring)
+//   PUT    /api/business/:businessId/ai-rules            (Phase 1 dashboard wiring)
+//   GET    /api/business/:businessId/connection-info     (Phase 1: source of truth for transport choice)
 //
 // Auth: Authorization: Bearer <jwt from Supabase auth signup/login>.
 // ---------------------------------------------------------------------------
@@ -404,6 +411,416 @@ router.get(
       service_ids: skillMap.get(s.id) || [],
     }));
     return res.json({ staff: staffWithSkills });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// 8. GET /api/business/:businessId/connection-info
+//
+// Phase 1 — source of truth for which transport a salon uses. The frontend
+// calls this from /salon-portal/onboarding to decide whether to show the
+// QR pairing page (web transport) or the Meta Cloud instructions
+// (phone_number_id registered).
+//
+// Returns:
+//   {
+//     businessId,
+//     phone_number_id_set,    // true → Meta Cloud transport
+//     qr_pairing_available,   // true → /onboarding/:id QR flow
+//     agent_active,           // true → already connected
+//     instructions,           // server-rendered default copy
+//     next_step               // 'inbox' | 'meta_cloud_setup' | 'scan_qr'
+//   }
+// ---------------------------------------------------------------------------
+router.get(
+  '/business/:businessId/connection-info',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const supabase = getSupabase();
+
+    const { data: biz, error } = await supabase
+      .from('businesses')
+      .select('id, phone_number_id, agent_active')
+      .eq('id', businessId)
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message });
+    if (!biz) {
+      return res.status(404).json({ error: 'business not found' });
+    }
+
+    const phone_number_id_set = !!biz.phone_number_id;
+    const qr_pairing_available = !phone_number_id_set;
+    const agent_active = !!biz.agent_active;
+
+    const instructions = phone_number_id_set
+      ? 'Your salon uses Meta Cloud API. Inbound WhatsApp messages arrive via Meta — no QR pairing needed.'
+      : 'Scan the QR code with your salon WhatsApp to start receiving customer messages.';
+
+    const next_step = agent_active
+      ? 'inbox'
+      : phone_number_id_set
+        ? 'meta_cloud_setup'
+        : 'scan_qr';
+
+    return res.json({
+      businessId,
+      phone_number_id_set,
+      qr_pairing_available,
+      agent_active,
+      instructions,
+      next_step,
+    });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// 9. GET /api/business/:businessId/staff
+//
+// Lists all staff for the business, joined with their skill service_ids
+// (the frontend renders a chip per skill on the Services & Staff tab).
+// ---------------------------------------------------------------------------
+router.get(
+  '/business/:businessId/staff',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const supabase = getSupabase();
+
+    const { data: rows, error } = await supabase
+      .from('staff')
+      .select('id, name, phone, role, working_days, is_active, created_at')
+      .eq('business_id', businessId)
+      .order('name');
+    if (error) return res.status(500).json({ error: error.message });
+
+    // Fetch all skills for this business in one go.
+    const { data: skillRows } = await supabase
+      .from('staff_skills')
+      .select('staff_id, service_id, services!inner(business_id)')
+      .eq('services.business_id', businessId);
+
+    const skillMap = new Map<string, string[]>();
+    for (const s of (skillRows || []) as Array<{
+      staff_id: string;
+      service_id: string;
+    }>) {
+      const arr = skillMap.get(s.staff_id) || [];
+      arr.push(s.service_id);
+      skillMap.set(s.staff_id, arr);
+    }
+
+    const staff = (rows || []).map((s) => ({
+      ...s,
+      service_ids: skillMap.get(s.id) || [],
+    }));
+    return res.json({ staff });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// 10. GET /api/business/:businessId/services
+// ---------------------------------------------------------------------------
+router.get(
+  '/business/:businessId/services',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase
+      .from('services')
+      .select('id, name, price, duration_minutes, category, created_at')
+      .eq('business_id', businessId)
+      .order('category', { nullsFirst: false })
+      .order('name');
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ services: data || [] });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// 11. GET /api/business/:businessId/dashboard-stats
+//
+// Powers the Overview tab. Returns:
+//   - kpis:               bookings handled by AI, conversations, resolution rate, revenue
+//   - hourly:             today's message volume bucketed by hour (PKT-friendly)
+//   - intents:            distribution of customer intents (currently empty —
+//                         would require LLM tagging on each inbound message)
+//   - feed:               last 10 inbound/outbound messages across all conversations
+//
+// KPIs use a rolling "this month" window — same logic the KPI mocks used.
+// ---------------------------------------------------------------------------
+router.get(
+  '/business/:businessId/dashboard-stats',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const supabase = getSupabase();
+
+    // Start of this calendar month, UTC.
+    const monthStart = new Date();
+    monthStart.setUTCDate(1);
+    monthStart.setUTCHours(0, 0, 0, 0);
+
+    const [aiBookings, totalBookings, conversations, completedAppts] =
+      await Promise.all([
+        supabase
+          .from('appointments')
+          .select('id', { count: 'exact', head: true })
+          .eq('business_id', businessId)
+          .eq('source', 'whatsapp_bot')
+          .gte('created_at', monthStart.toISOString()),
+        supabase
+          .from('appointments')
+          .select('id', { count: 'exact', head: true })
+          .eq('business_id', businessId)
+          .gte('created_at', monthStart.toISOString()),
+        supabase
+          .from('conversations')
+          .select('id', { count: 'exact', head: true })
+          .eq('business_id', businessId)
+          .gte('last_message_at', monthStart.toISOString()),
+        supabase
+          .from('appointments')
+          .select('services(price)')
+          .eq('business_id', businessId)
+          .eq('status', 'completed')
+          .gte('created_at', monthStart.toISOString()),
+      ]);
+
+    const aiCount = aiBookings.count || 0;
+    const totalCount = totalBookings.count || 0;
+    const revenue = ((completedAppts.data || []) as unknown as Array<{
+      services: { price: number } | null;
+    }>).reduce(
+      (sum, a) => sum + (a.services?.price || 0),
+      0
+    );
+
+    // Today's message volume bucketed by UTC hour, returned as 12 buckets
+    // (8a → 8p) for the chart.
+    const dayStart = new Date();
+    dayStart.setUTCHours(0, 0, 0, 0);
+    const { data: todayMessages } = await supabase
+      .from('messages')
+      .select('created_at, conversations!inner(business_id)')
+      .eq('conversations.business_id', businessId)
+      .gte('created_at', dayStart.toISOString());
+
+    const buckets = [8, 10, 12, 14, 16, 18, 20, 22, 0, 2, 4, 6];
+    const hourly = buckets.map((h) => ({
+      h: `${h === 0 ? 12 : h > 12 ? h - 12 : h}${h < 12 || h === 24 ? 'a' : 'p'}`,
+      c: 0,
+    }));
+    for (const m of (todayMessages || []) as Array<{ created_at: string }>) {
+      const hour = new Date(m.created_at).getUTCHours();
+      const idx = buckets.indexOf(hour);
+      if (idx >= 0) hourly[idx].c++;
+    }
+
+    // Last 10 messages for the activity feed.
+    const { data: recentMsgs } = await supabase
+      .from('messages')
+      .select(
+        'id, content, sender_type, created_at, conversations!inner(customer_id, customers(name, phone))'
+      )
+      .eq('conversations.business_id', businessId)
+      .order('created_at', { ascending: false })
+      .limit(10);
+
+    const feed = ((recentMsgs || []) as unknown as Array<{
+      content: string;
+      sender_type: string;
+      created_at: string;
+      conversations: {
+        customers: { name: string | null; phone: string } | null;
+      };
+    }>).map((m) => {
+      const cust = m.conversations?.customers;
+      const who = cust?.name || cust?.phone || 'customer';
+      const verb =
+        m.sender_type === 'ai'
+          ? 'Recepta replied to'
+          : m.sender_type === 'customer'
+            ? `Message from ${who}`
+            : 'Note';
+      const snippet =
+        m.content.length > 80 ? `${m.content.slice(0, 77)}...` : m.content;
+      return {
+        text: `${verb}: ${snippet}`,
+        tone:
+          m.sender_type === 'ai'
+            ? 'success'
+            : m.sender_type === 'customer'
+              ? 'muted'
+              : 'warn',
+        time: new Date(m.created_at).toISOString(),
+      };
+    });
+
+    return res.json({
+      kpis: {
+        bookings_handled: aiCount,
+        conversations_processed: conversations.count || 0,
+        resolution_rate: totalCount > 0 ? Math.round((aiCount / totalCount) * 100) : 0,
+        revenue_pkr: revenue,
+      },
+      hourly,
+      intents: [], // requires intent-tagging on inbound messages
+      feed,
+    });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// 12. GET /api/business/:businessId/escalations
+//
+// Powers the Edge Cases tab. Joins escalation_events with conversations
+// (to scope to this business) and customers (for display name + phone).
+// ---------------------------------------------------------------------------
+router.get(
+  '/business/:businessId/escalations',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase
+      .from('escalation_events')
+      .select(
+        'id, reason, ai_draft_response, resolved, resolved_at, created_at, triggered_rule_id, conversations!inner(id, business_id, customers(name, phone)), edge_case_rules(label, kind)'
+      )
+      .eq('conversations.business_id', businessId)
+      .order('created_at', { ascending: false })
+      .limit(100);
+    if (error) return res.status(500).json({ error: error.message });
+
+    const escalations = ((data || []) as unknown as Array<{
+      id: string;
+      reason: string;
+      ai_draft_response: string | null;
+      resolved: boolean;
+      resolved_at: string | null;
+      created_at: string;
+      triggered_rule_id: string | null;
+      conversations: {
+        id: string;
+        customers: { name: string | null; phone: string } | null;
+      };
+      edge_case_rules: { label: string; kind: string } | null;
+    }>).map((e) => ({
+      id: e.id,
+      conversation_id: e.conversations.id,
+      customer_name: e.conversations.customers?.name || 'Unknown',
+      customer_phone: e.conversations.customers?.phone || '',
+      reason: e.reason,
+      rule_label: e.edge_case_rules?.label || e.reason,
+      rule_kind: e.edge_case_rules?.kind || 'soft',
+      ai_draft: e.ai_draft_response,
+      resolved: e.resolved,
+      resolved_at: e.resolved_at,
+      created_at: e.created_at,
+    }));
+    return res.json({ escalations });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// 13. GET /api/business/:businessId/ai-rules
+// 14. PUT /api/business/:businessId/ai-rules
+//
+// Owner-customized AI agent rules (TenantAIRules.tsx). Stored as JSONB
+// on the businesses row (see database/schema/14_business_ai_rules.sql).
+// Returns sensible defaults when the column is NULL so the UI never
+// sits empty for a fresh signup.
+// ---------------------------------------------------------------------------
+const DEFAULT_AI_RULES = {
+  rules: [] as string[],
+  triggers: { discounts: true, late: true, custom: true },
+  discountMode: 'promo' as 'decline' | 'promo',
+  latePolicy:
+    'If a customer is more than 15 minutes late, offer to reschedule or hold the slot for 5 more minutes.',
+};
+
+router.get(
+  '/business/:businessId/ai-rules',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase
+      .from('businesses')
+      .select('ai_rules')
+      .eq('id', businessId)
+      .maybeSingle();
+    if (error) return res.status(500).json({ error: error.message });
+
+    const stored = (data?.ai_rules as Partial<typeof DEFAULT_AI_RULES>) || {};
+    const merged = {
+      rules: Array.isArray(stored.rules) ? stored.rules : DEFAULT_AI_RULES.rules,
+      triggers: {
+        discounts:
+          typeof stored.triggers?.discounts === 'boolean'
+            ? stored.triggers.discounts
+            : DEFAULT_AI_RULES.triggers.discounts,
+        late:
+          typeof stored.triggers?.late === 'boolean'
+            ? stored.triggers.late
+            : DEFAULT_AI_RULES.triggers.late,
+        custom:
+          typeof stored.triggers?.custom === 'boolean'
+            ? stored.triggers.custom
+            : DEFAULT_AI_RULES.triggers.custom,
+      },
+      discountMode:
+        stored.discountMode === 'decline' || stored.discountMode === 'promo'
+          ? stored.discountMode
+          : DEFAULT_AI_RULES.discountMode,
+      latePolicy:
+        typeof stored.latePolicy === 'string' && stored.latePolicy.length > 0
+          ? stored.latePolicy
+          : DEFAULT_AI_RULES.latePolicy,
+    };
+    return res.json(merged);
+  }
+);
+
+router.put(
+  '/business/:businessId/ai-rules',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const body = (req.body || {}) as Partial<typeof DEFAULT_AI_RULES>;
+
+    const payload = {
+      rules: Array.isArray(body.rules) ? body.rules.slice(0, 50) : [],
+      triggers: {
+        discounts: !!body.triggers?.discounts,
+        late: !!body.triggers?.late,
+        custom: !!body.triggers?.custom,
+      },
+      discountMode:
+        body.discountMode === 'decline' || body.discountMode === 'promo'
+          ? body.discountMode
+          : 'promo',
+      latePolicy:
+        typeof body.latePolicy === 'string'
+          ? body.latePolicy.slice(0, 1000)
+          : DEFAULT_AI_RULES.latePolicy,
+    };
+
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+      .from('businesses')
+      .update({ ai_rules: payload })
+      .eq('id', businessId)
+      .select('ai_rules')
+      .single();
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data?.ai_rules || payload);
   }
 );
 
