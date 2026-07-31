@@ -58,7 +58,10 @@ export interface BookingDecisionResult {
  */
 function hasAllBookingSlots(r: GenerateReplyResult): boolean {
   return Boolean(
-    r.service_interest && r.preferred_date && r.preferred_time
+    r.service_interest &&
+    r.preferred_date &&
+    r.preferred_time &&
+    r.customer_name          // REQUIRED — forces bot to ask for the name
   );
 }
 
@@ -190,15 +193,11 @@ export async function processBookingDecision(
     return { finalReply: llmResult.reply, appointment: null };
   }
 
-  // Step 3: persist slots so follow-up messages ("yes 3pm") interpret correctly
-  try {
-    await persistBookingSlots(ctx.conversationId, llmResult);
-    console.log('[booking-decision] slot state persisted');
-  } catch (e) {
-    console.warn('[booking-decision] persistBookingSlots failed (non-fatal):',
-      (e as Error).message);
-    // Non-fatal — continue with booking attempt anyway.
-  }
+  // Step 3: state persistence is now handled in message-handler.ts
+  // (right after the LLM call, before this function runs). That way
+  // every LLM call — not just `book` attempts — keeps the
+  // conversation_state in sync with the LLM's latest understanding.
+  // Doing it here too would race with that update and be redundant.
 
   // Step 4: attempt the booking
   let outcome: AppointmentOutcome;

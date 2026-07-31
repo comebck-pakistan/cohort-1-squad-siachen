@@ -93,6 +93,20 @@ Hard rules:
 - If the customer asks medical / skin-condition questions, politely decline
   medical advice and offer to have a stylist call them back.
 - Keep replies SHORT (1-3 sentences max, like a real WhatsApp message).
+- NEVER use emojis, emoticons, or decorative symbols (no 💅 😊 ✨ 💖 🙏 etc.).
+  Plain professional text only. If the customer uses emojis, you may mirror
+  the sentiment in words but not in symbols.
+- Service extraction priority for booking:
+  1. If the customer's CURRENT message names a service → use it
+  2. If the current message has NO service, USE the service_interest from
+     conversation_state (it reflects the most recent service the customer
+     was asking about — e.g. they just asked about Acrylic Full Set 30
+     seconds ago, so the next "saturday 5 pm" is almost certainly for Acrylic)
+  3. If neither has a service, ask the customer which one
+- Never invent or default to a different service than what was just being
+  discussed. If they were asking about Acrylic Full Set, do NOT offer
+  "gel manicure, classic pedicure, ya kuch aur" as alternatives — they
+  already told you which one.
 - If the business context says it is NOT YET CONFIGURED (no services loaded),
   gracefully say so and ask the customer to share what they need — the owner
   will respond shortly.
@@ -101,7 +115,7 @@ OUTPUT FORMAT — every reply MUST be a JSON object with EXACTLY these fields:
 {
   "intent": one of: "greeting" | "price_inquiry" | "book" | "reschedule" | "cancel" | "hours_inquiry" | "directions" | "complaint" | "other",
   "service_interest": string or null — name of the service the customer is asking about (must match or be close to one of the services in your context)
-  "preferred_date": string or null — ISO date YYYY-MM-DD if customer gave one (e.g. "tomorrow", "kal", "next Monday" → resolve to actual date). Use TODAY's date as the reference.
+  "preferred_date": string or null — ISO date YYYY-MM-DD if customer gave one. CRITICAL: use the "Date reference" table in the per-request context to look up day names. NEVER do day-of-week arithmetic from scratch — it produces off-by-one errors (e.g. resolving "Saturday" to the next Sunday).
   "preferred_time": string or null — 24-hour HH:MM if customer gave a time (e.g. "3pm" → "15:00", "subah 10 baje" → "10:00")
   "customer_name": string or null — if the customer shared their name
   "customer_phone": string or null — if the customer shared their phone
@@ -130,6 +144,32 @@ const TODAY_ISO = (() => {
   return `${yyyy}-${mm}-${dd}`;
 })();
 
+// Build an explicit 7-day reference table in Asia/Karachi so the LLM
+// doesn't have to guess day-of-week arithmetic. Without this, we've
+// seen MiniMax return "Sunday 2026-08-02" when the customer typed
+// "Saturday" — it was off by one because the LLM tried to do date math
+// from scratch. An explicit lookup table is much more reliable.
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
+
+const DATE_REFERENCE = (() => {
+  // Get "today" in Asia/Karachi (the salon's timezone). Server may be
+  // in UTC, so we convert to PKT before counting days forward.
+  const nowPKT = new Date(
+    new Date().toLocaleString('en-US', { timeZone: 'Asia/Karachi' })
+  );
+
+  const lines: string[] = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(nowPKT);
+    d.setDate(nowPKT.getDate() + i);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    lines.push(`  ${DAY_NAMES[d.getDay()]} ${yyyy}-${mm}-${dd}`);
+  }
+  return lines.join('\n');
+})();
+
 /**
  * Build the per-business system prompt by appending the salon's real data
  * (services, hours, staff count) plus the structured conversation state.
@@ -145,7 +185,17 @@ function buildSystemPrompt(
   const lines: string[] = [
     BASE_PROMPT,
     '',
-    `Today's date is ${TODAY_ISO} (use this to resolve "today", "tomorrow", "kal").`,
+    `Today's date is ${TODAY_ISO} (Asia/Karachi).`,
+    '',
+    `## Date reference (next 7 days, Asia/Karachi) — USE THIS TABLE to resolve day names`,
+    `When the customer says a day of the week ("Saturday", "next Monday", "kal Saturday"), find the matching row below and use the ISO date. Do NOT do day-of-week arithmetic yourself — it is error-prone.`,
+    DATE_REFERENCE,
+    '',
+    `Examples:`,
+    `  - "Saturday" → look up "Sat" row in the table above, use that ISO date`,
+    `  - "tomorrow" → use the ISO date for the second row (i+1)`,
+    `  - "kal" / "aaj" / "parso" → "aaj"=today (first row), "kal"=i+1, "parso"=i+2`,
+    `  - "next Saturday" → only use the NEXT occurrence in the table; if today is Sat, use i+7`,
     '',
     `## You are answering for: ${ctx.name}`,
   ];
@@ -196,12 +246,15 @@ function buildSystemPrompt(
     lines.push('');
   }
 
-  lines.push('## Booking flow (when intent is "book")');
-  lines.push('1. Confirm which service they want');
+  lines.push('## Booking flow (when intent is "book") — STRICT ORDER');
+  lines.push('1. Confirm which service they want (or already know it)');
   lines.push('2. Confirm their preferred date and time');
   lines.push('3. If you have hours for that day, confirm the time falls within them');
-  lines.push('4. Ask for their full name and phone number to confirm');
-  lines.push('5. Set reply_text to indicate you will request the slot');
+  lines.push("4. **MANDATORY**: Ask for the customer's FULL NAME before attempting the booking. The system will reject any booking attempt where customer_name is null, so do NOT promise a confirmed slot until they give you their name.");
+  lines.push('5. Set reply_text to indicate you will request the slot (only when all 4 fields are present: service, name, date, time)');
+  lines.push('');
+  lines.push('Example bad reply (will be rejected): "Booking confirmed for Saturday 3pm." — NO NAME = no booking.');
+  lines.push('Example good reply: "Got it — Saturday 3pm works. Can I get your name to confirm the booking?"');
   lines.push('');
 
   return lines.join('\n');
@@ -234,11 +287,13 @@ export async function generateReply({
       API_URL,
       {
         model: MODEL,
-        // Bumped from 800 → 1500 because we've observed MiniMax
-        // truncate mid-JSON on long system prompts (full services +
-        // hours + state), leaving "preferred_time": "15:" — which our
-        // parser then leaks to the customer as the bot reply.
-        max_tokens: 1500,
+        // Bumped 800 → 1500 → 3000 because the prompt keeps growing
+        // (date reference table + service/hours state + per-salon AI
+        // rules + emoji ban + STRICT booking flow) and the model now
+        // produces longer reasoning before the JSON. Truncation at
+        // 1500 left the bot replying with the FALLBACK message
+        // ("Sorry, I am having trouble responding right now").
+        max_tokens: 3000,
         messages,
       },
       {
@@ -392,5 +447,15 @@ function sanitizeReply(raw: unknown): string {
     return FALLBACK_RESULT.reply;
   }
   // Strip any <think> blocks that survived parsing.
-  return raw.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+  let cleaned = raw.replace(/<think>[\s\S]*?<\/think>/g, '');
+  // Strip emojis and pictographic symbols as a safety net — the LLM
+  // sometimes ignores the "no emojis" prompt rule. We cover:
+  //   - Most emoji blocks (😀..🙏, ✂..➰ etc.)
+  //   - Variation selectors (FE0F) and ZWJ sequences
+  //   - Misc symbols & dingbats (✀-➿, 🀄-🪿 etc.)
+  cleaned = cleaned.replace(
+    /[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}\u{FE0F}\u{200D}]/gu,
+    ''
+  );
+  return cleaned.trim();
 }

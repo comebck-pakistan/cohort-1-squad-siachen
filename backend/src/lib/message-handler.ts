@@ -161,6 +161,62 @@ export async function handleIncomingMessage(
       conversationStatePrompt,
     });
 
+    // Step 5b: persist the LLM's structured extraction to conversation_state.
+    //
+    // This is the architectural fix for "stale state" bugs. Previously
+    // we only updated conversation_state on `book` intent attempts (via
+    // persistBookingSlots in booking.ts), so any other intent — price
+    // inquiry, greeting, hours question, etc. — left the state pointing
+    // at whatever the LAST booking was, sometimes from hours or days ago.
+    //
+    // That caused the bot to book the wrong service (e.g. customer just
+    // asked about Acrylic Full Set, but state still had Gel Manicure
+    // from a 30-minute-old booking attempt, so "saturday 5 pm" got
+    // attached to Gel Manicure).
+    //
+    // Now: every LLM call updates state with the LLM's latest extraction.
+    //   - intent:        the LLM's understanding of this turn's goal
+    //   - service_interest: what the customer is currently asking about
+    //   - preferred_date/time: resolved dates and times
+    //   - customer_name/phone: captured identity (if provided)
+    //
+    // We write null/empty values to clear stale state, because the LLM's
+    // current understanding is the source of truth. If the customer says
+    // "hi" and LLM returns service_interest=null, we WANT state cleared
+    // — there's no ongoing service discussion.
+    //
+    // The prompt's "service extraction priority" rule then makes the next
+    // turn's LLM call use this fresh state as authoritative when the
+    // current message is ambiguous (e.g. "saturday 5 pm" with no service
+    // mentioned uses state.service_interest = "Acrylic Full Set").
+    if (conversationId) {
+      try {
+        await updateConversationState(conversationId, {
+          current_intent:    llmResult.intent,
+          service_interest:  llmResult.service_interest ?? undefined,
+          preferred_date:    llmResult.preferred_date ?? undefined,
+          preferred_time:    llmResult.preferred_time ?? undefined,
+          customer_name:     llmResult.customer_name ?? undefined,
+          customer_phone:    llmResult.customer_phone ?? undefined,
+        });
+        requestLog.debug(
+          {
+            intent:           llmResult.intent,
+            service_interest: llmResult.service_interest,
+            preferred_date:   llmResult.preferred_date,
+            preferred_time:   llmResult.preferred_time,
+            customer_name:    llmResult.customer_name,
+          },
+          'conversation_state synced from LLM output'
+        );
+      } catch (e) {
+        requestLog.warn(
+          { err: (e as Error).message },
+          'failed to sync conversation_state from LLM (continuing)'
+        );
+      }
+    }
+
     // Step 6: booking decision (only if we have a conversationId for state writes)
     if (conversationId && customerId) {
       const decision = await processBookingDecision(llmResult, {
