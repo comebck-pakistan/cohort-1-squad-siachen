@@ -146,52 +146,90 @@ export class WhatsAppWebClient extends EventEmitter {
       absoluteSessionDir,
       this.businessId
     );
-    try {
-      // Defensively nuke any phantom state at this path BEFORE we try
-      // to create a directory there. WSL's 9P filesystem (the
-      // /mnt/c/... bind mount) can leave a path in a split-brain state
-      // where Node's fs APIs see the directory as missing while Linux's
-      // mkdir reports "Already exists" — a leftover from a previous
-      // operator-side delete (Remove-Item, rm -rf) that 9P hasn't
-      // fully reconciled. Removing first gives us a known-clean slate
-      // before recreating.
-      //
-      // Cost: any existing LocalAuth session data is wiped. Re-pairing
-      // via QR is required for previously-linked salons. Acceptable for
-      // our current state (the 3 working salons were already showing
-      // Runtime.callFunctionOn / ERR_TIMED_OUT and needed re-linking
-      // anyway). For production we'd gate this on a per-salon "first
-      // time" flag — TODO post-demo.
-      fs.rmSync(absoluteSessionDir, {
-        recursive: true,
-        force: true,
-      });
 
-      // Use the shell's `mkdir -p` rather than fs.mkdirSync.
-      //
-      // On WSL2, fs.mkdirSync over the /mnt/c/... 9P bind mount hits
-      // a quirk where creating a directory whose path was just deleted
-      // returns ENOENT (NTFS metadata cache in the 9P layer conflicts
-      // with the new inode). The native `mkdir -p` binary on the WSL
-      // Linux side bypasses that translation and creates the dir
-      // cleanly. This is a single spawn per salon at construction
-      // time (~50ms), so the cost is negligible.
-      execSync(`mkdir -p ${JSON.stringify(localAuthDir)}`, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+    // Determine whether the LocalAuth subdir needs to be (re)created.
+    // We must NOT wipe it when it contains valid session data — that's
+    // how LocalAuth re-uses a saved session across bridge restarts
+    // instead of forcing a fresh QR every time.
+    //
+    // Recreate only when the subdir is genuinely missing or phantom
+    // (file-instead-of-dir, broken symlink). The WSL/9P split-brain
+    // handling stays — those phantom states still need the rmSync +
+    // mkdir dance. The previous version of this code rmSync'd
+    // unconditionally on every bridge restart, which forced every
+    // salon to re-scan QR every time we redeployed. That was a TODO
+    // post-demo hack that the demo has now reached.
+    let needsRecreate = false;
+    try {
+      const localAuthStat = fs.lstatSync(localAuthDir);
+      if (!localAuthStat.isDirectory()) {
+        log.warn(
+          {
+            businessId: this.businessId,
+            localAuthDir,
+            phantomKind: localAuthStat.isFile()
+              ? 'regular-file'
+              : localAuthStat.isSymbolicLink()
+              ? 'symlink'
+              : 'other',
+          },
+          'localAuthDir is not a directory; removing phantom before recreate'
+        );
+        needsRecreate = true;
+      }
+    } catch {
+      // Subdir doesn't exist yet — first-time init for this salon.
+      needsRecreate = true;
+    }
+
+    try {
+      if (needsRecreate) {
+        // Defensively nuke any phantom state at the outer path BEFORE
+        // we try to create a directory. WSL's 9P filesystem can leave
+        // a path in a split-brain state where Node's fs APIs see the
+        // directory as missing while Linux's mkdir reports "Already
+        // exists" — a leftover from a previous operator-side delete
+        // (Remove-Item, rm -rf) that 9P hasn't fully reconciled.
+        // Removing first gives us a known-clean slate before recreating.
+        fs.rmSync(absoluteSessionDir, {
+          recursive: true,
+          force: true,
+        });
+
+        // Use the shell's `mkdir -p` rather than fs.mkdirSync. On WSL2,
+        // fs.mkdirSync over the /mnt/c/... 9P bind mount hits a quirk
+        // where creating a directory whose path was just deleted returns
+        // ENOENT (NTFS metadata cache conflicts with the new inode). The
+        // native `mkdir -p` binary bypasses that translation. ~50ms.
+        execSync(`mkdir -p ${JSON.stringify(localAuthDir)}`, {
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      }
+
       // Defensive: sanity-check the directory really exists before
-      // handing control to whatsapp-web.js. If execSync says success
-      // but we can't observe the dir, the catch block below will
-      // surface a useful diagnostic.
+      // handing control to whatsapp-web.js. If something went wrong
+      // above, the catch block will surface a useful diagnostic.
       const verifyStat = fs.lstatSync(localAuthDir);
       if (!verifyStat.isDirectory()) {
         throw new Error(
-          `mkdir succeeded but path is not a directory: ${localAuthDir}`
+          `localAuthDir is not a directory: ${localAuthDir}`
         );
       }
+
+      // Surface whether we're resuming an existing session or starting
+      // fresh. This makes the bridge log self-documenting for the
+      // "did we re-scan QR or not?" debugging question.
+      const credsPath = path.join(localAuthDir, 'creds.json');
+      const hasExistingCreds = fs.existsSync(credsPath);
       log.info(
-        { businessId: this.businessId, localAuthDir },
-        'session dir ready'
+        {
+          businessId: this.businessId,
+          localAuthDir,
+          hasExistingCreds,
+        },
+        hasExistingCreds
+          ? 'session dir ready (reusing LocalAuth session)'
+          : 'session dir ready (no creds; will generate QR)'
       );
     } catch (e) {
       // Diagnostic — capture everything we can about the path's state.
@@ -318,13 +356,36 @@ export class WhatsAppWebClient extends EventEmitter {
       log.info({ businessId: this.businessId }, 'authenticated; syncing');
     });
 
-    this.client.on('auth_failure', (msg: string) => {
+    this.client.on('auth_failure', async (msg: string) => {
       this.latestQR = null;
       log.error(
         { businessId: this.businessId, msg },
-        'auth failure — session may need to be re-linked'
+        'auth failure — destroying client and clearing locks before re-prompt'
       );
-      this.setStatus('expired');
+
+      // Tear down so the next initialize() launches a fresh chromium instead
+      // of inheriting the corrupted LocalAuth state that caused this failure.
+      try {
+        await this.client.destroy();
+        log.info({ businessId: this.businessId }, 'chromium destroyed after auth_failure');
+      } catch (e) {
+        log.warn(
+          { businessId: this.businessId, err: (e as Error).message },
+          'destroy error after auth_failure (continuing)'
+        );
+      }
+
+      try {
+        clearChromiumLocks(this.sessionDir);
+      } catch (e) {
+        log.warn(
+          { businessId: this.businessId, err: (e as Error).message },
+          'clearChromiumLocks error after auth_failure'
+        );
+      }
+
+      // Return to QR-prompting so the operator can re-link the salon.
+      this.setStatus('qr_pending');
     });
 
     this.client.on('ready', () => {
@@ -334,13 +395,80 @@ export class WhatsAppWebClient extends EventEmitter {
       log.info({ businessId: this.businessId }, 'client ready');
     });
 
-    this.client.on('disconnected', (reason: string) => {
+    this.client.on('disconnected', async (reason: string) => {
       log.warn(
         { businessId: this.businessId, reason },
         'disconnected from whatsapp'
       );
       this.setStatus('disconnected');
+      this.clearReconnectTimer();
+
+      // Cleanup chain — the previous version of this handler called
+      // attemptReconnect() immediately, which meant a fresh initialize()
+      // raced against a still-dying chromium and stale user-data-dir
+      // locks. The next init then hung or loaded a half-written
+      // IndexedDB state. This handler forces the lifecycle to complete
+      // before we re-init.
+      //
+      // Phase 1: tear down the underlying chromium. destroy() is
+      // idempotent (returns early if already destroying).
+      try {
+        await this.client.destroy();
+        log.info(
+          { businessId: this.businessId },
+          'chromium destroyed cleanly during disconnect cleanup'
+        );
+      } catch (e) {
+        log.warn(
+          { businessId: this.businessId, err: (e as Error).message },
+          'destroy error during disconnect cleanup (continuing)'
+        );
+      }
+
+      // Phase 2: scrub SingletonLock + any other stale lockfiles so the
+      // next chromium launch doesn't bail on "user-data-dir is in use".
+      try {
+        clearChromiumLocks(this.sessionDir);
+      } catch (e) {
+        log.warn(
+          { businessId: this.businessId, err: (e as Error).message },
+          'clearChromiumLocks error during disconnect cleanup'
+        );
+      }
+
+      // Phase 3: grace period for filesystem + libuv handles to settle.
+      // 2.5s is empirically enough for WSL/9P and plain Linux.
+      await new Promise<void>((resolve) => setTimeout(resolve, 2500));
+
+      // Phase 4: fresh initialize(). The destroy() + clearLocks() above
+      // left the Client in a clean state, so this launch is reliable.
       this.attemptReconnect();
+    });
+
+    // Granular state transitions from whatsapp-web.js. The 'disconnected'
+    // event only tells us "we lost the socket" — it doesn't distinguish
+    // a temporary network blip from the phone unlinking us. change_state
+    // exposes the inner state machine so we can react appropriately:
+    //
+    //   UNPAIRED / UNPAIRED_IDLE — phone unlinked us; creds are dead.
+    //   CONFLICT                  — another WhatsApp Web session took over.
+    //   TIMEOUT                   — auth timed out (network too slow).
+    //   DEPRECATED_VERSION        — WhatsApp Web protocol outdated.
+    //
+    // For UNPAIRED we move to qr_pending and let the disconnected
+    // handler above handle the destroy + lock-sweep + re-init chain.
+    this.client.on('change_state', (state: string) => {
+      log.info(
+        { businessId: this.businessId, state },
+        'whatsapp-web state changed'
+      );
+      if (state === 'UNPAIRED' || state === 'UNPAIRED_IDLE') {
+        log.warn(
+          { businessId: this.businessId, state },
+          'phone unlinked; transitioning to qr_pending for re-pair'
+        );
+        this.setStatus('qr_pending');
+      }
     });
 
     this.client.on('message', (msg: Message) => {
