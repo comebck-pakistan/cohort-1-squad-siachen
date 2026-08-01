@@ -68,8 +68,8 @@ export const Route = createFileRoute("/onboarding")({
 const STEPS = [
   { key: "profile", title: "Salon Profile", icon: Store },
   { key: "persona", title: "WhatsApp Agent & Persona", icon: Bot },
-  { key: "software", title: "Booking Software", icon: Link2 },
-  { key: "knowledge", title: "Services & Pricing", icon: ClipboardList },
+  // { key: "software", title: "Booking Software", icon: Link2 },
+  // { key: "knowledge", title: "Services & Pricing", icon: ClipboardList },
   { key: "payment", title: "Payment", icon: CreditCard },
 ] as const;
 
@@ -80,6 +80,14 @@ interface Service {
   id: string;
   name: string;
   price: string;
+}
+
+function createServiceId(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+
+  return `service-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 const TIERS: Record<TierKey, { name: string; monthly: number }> = {
@@ -104,6 +112,8 @@ function OnboardingPage() {
 
   // Step 1
   const [salonName, setSalonName] = useState("");
+  const [ownerEmail, setOwnerEmail] = useState("");
+  const [ownerPassword, setOwnerPassword] = useState("");
   const [phone, setPhone] = useState("");
   const [city, setCity] = useState("");
   const [salonType, setSalonType] = useState<SalonType | "">("");
@@ -122,8 +132,8 @@ function OnboardingPage() {
 
   // Step 4
   const [services, setServices] = useState<Service[]>([
-    { id: crypto.randomUUID(), name: "Women's Haircut", price: "3,500" },
-    { id: crypto.randomUUID(), name: "Full Gel Manicure", price: "2,800" },
+    { id: "initial-haircut", name: "Women's Haircut", price: "3,500" },
+    { id: "initial-manicure", name: "Full Gel Manicure", price: "2,800" },
   ]);
   const [deposit, setDeposit] = useState(true);
 
@@ -143,7 +153,7 @@ function OnboardingPage() {
       : TIERS[tier].monthly;
 
   function next() {
-    if (step === 0 && (!salonName || !phone || !city || !salonType)) {
+    if (step === 0 && (!salonName || !ownerEmail || ownerPassword.length < 8 || !phone || !city || !salonType)) {
       toast.error("Please complete your salon profile");
       return;
     }
@@ -163,9 +173,14 @@ function OnboardingPage() {
       return;
     }
     setSubmitting(true);
-    localStorage.setItem(
-      "recepta.onboarding",
-      JSON.stringify({
+    try {
+      const receiptBase64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+        reader.onerror = () => reject(reader.error || new Error("Could not read receipt"));
+        reader.readAsDataURL(receipt);
+      });
+      const submission = {
         salonName,
         phone,
         city,
@@ -181,12 +196,42 @@ function OnboardingPage() {
         payMethod,
         payerName,
         txnRef,
-        receiptName: receipt.name,
-      }),
-    );
-    await new Promise((r) => setTimeout(r, 900));
-    setSubmitting(false);
-    setDone(true);
+        receipt: { name: receipt.name, type: receipt.type, base64: receiptBase64 },
+      };
+      const signupResponse = await fetch(`${import.meta.env.VITE_API_URL || ""}/api/auth/signup-tenant`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          business_name: salonName,
+          owner_name: payerName,
+          owner_email: ownerEmail,
+          owner_phone: phone,
+          owner_password: ownerPassword,
+          whatsapp_number: phone,
+          city,
+          business_type: salonType,
+        }),
+      });
+      const signupResult = await signupResponse.json().catch(() => ({}));
+      if (!signupResponse.ok || !signupResult.business_id) {
+        throw new Error(signupResult.error || "Could not create salon login");
+      }
+      const response = await fetch(`${import.meta.env.VITE_API_URL || ""}/api/onboarding/submit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...submission, businessId: signupResult.business_id }),
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.error || "Submission failed");
+      }
+      localStorage.setItem("recepta.onboarding", JSON.stringify({ ...submission, receipt: undefined, receiptName: receipt.name }));
+      setDone(true);
+    } catch (error) {
+      toast.error((error as Error).message || "Could not submit onboarding");
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   if (done) {
@@ -253,6 +298,29 @@ function OnboardingPage() {
                     placeholder="e.g. Aura Salon & Spa"
                     value={salonName}
                     onChange={(e) => setSalonName(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <Label>Owner Email</Label>
+                  <Input
+                    className="mt-1.5 h-11"
+                    type="email"
+                    autoComplete="email"
+                    placeholder="you@salon.pk"
+                    value={ownerEmail}
+                    onChange={(e) => setOwnerEmail(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <Label>Create Password</Label>
+                  <Input
+                    className="mt-1.5 h-11"
+                    type="password"
+                    minLength={8}
+                    autoComplete="new-password"
+                    placeholder="At least 8 characters"
+                    value={ownerPassword}
+                    onChange={(e) => setOwnerPassword(e.target.value)}
                   />
                 </div>
                 <div>
@@ -384,6 +452,7 @@ function OnboardingPage() {
             </div>
           )}
 
+          {/* Temporarily disabled: Booking Software step.
           {step === 2 && (
             <div>
               <h2 className="font-display text-3xl font-semibold tracking-tight">Connect your booking software</h2>
@@ -423,8 +492,9 @@ function OnboardingPage() {
                 ))}
               </div>
             </div>
-          )}
+          )} */}
 
+          {/* Temporarily disabled: Services & Pricing step.
           {step === 3 && (
             <div>
               <h2 className="font-display text-3xl font-semibold tracking-tight">Top services & prices</h2>
@@ -472,7 +542,7 @@ function OnboardingPage() {
                 <button
                   type="button"
                   onClick={() =>
-                    setServices([...services, { id: crypto.randomUUID(), name: "", price: "" }])
+                    setServices([...services, { id: createServiceId(), name: "", price: "" }])
                   }
                   className="flex items-center gap-2 rounded-lg border border-dashed border-border px-3 py-2 text-sm text-muted-foreground hover:border-primary/40 hover:text-primary"
                 >
@@ -489,9 +559,9 @@ function OnboardingPage() {
                 <Switch checked={deposit} onCheckedChange={setDeposit} />
               </div>
             </div>
-          )}
+          )} */}
 
-          {step === 4 && (
+          {step === 2 && (
             <div>
               <h2 className="font-display text-3xl font-semibold tracking-tight">Confirm your plan & payment</h2>
               <p className="mt-2 text-sm text-muted-foreground">

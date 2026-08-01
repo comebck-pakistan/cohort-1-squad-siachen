@@ -82,6 +82,8 @@ export interface AIRules {
 const BASE_URL = (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_URL) || "";
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
+  const superadminToken = typeof localStorage !== "undefined" ? localStorage.getItem("recepta.superadmin.token") : null;
+  if (superadminToken) return { Authorization: `Bearer ${superadminToken}` };
   const { data } = await supabase().auth.getSession();
   const token = data.session?.access_token;
   return token ? { Authorization: `Bearer ${token}` } : {};
