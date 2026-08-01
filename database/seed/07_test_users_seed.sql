@@ -34,28 +34,9 @@
 --    FABS's real data eventually live in.
 -- =====================================================================
 
--- 1. Create a Test Superadmin (for platform-wide admin testing)
-INSERT INTO auth.users (
-  instance_id, id, email, encrypted_password, email_confirmed_at,
-  raw_user_meta_data, created_at, updated_at, role, aud
-)
-VALUES (
-  '00000000-0000-0000-0000-000000000000',                  -- Supabase's default instance_id
-  '11111111-1111-1111-1111-111111111111',                  -- Fixed UUID for easy reference
-  'admin@saloniq.com',                                      -- Superadmin Login Email
-  crypt('CHANGE_ME_ADMIN_PW', gen_salt('bf')),              -- Encrypted Password — replace locally, never commit real value
-  now(),
-  '{"full_name": "Platform Admin"}'::jsonb,
-  now(),
-  now(),
-  'authenticated',
-  'authenticated'
-) ON CONFLICT (id) DO NOTHING;
-
--- Force role to 'superadmin' (since the trigger defaults to 'business_owner')
-UPDATE public.profiles 
-SET role = 'superadmin' 
-WHERE id = '11111111-1111-1111-1111-111111111111';
+-- Superadmin access is intentionally not seeded into auth.users. The
+-- dedicated /api/auth/superadmin-login endpoint validates SUPERADMIN_SECRET
+-- and issues a short-lived signed session instead.
 
 -- 2. Create a Test Salon Owner (for standard dashboard testing)
 INSERT INTO auth.users (
