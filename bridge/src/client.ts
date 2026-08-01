@@ -1,6 +1,5 @@
 import { Client, LocalAuth, Message } from 'whatsapp-web.js';
 import { EventEmitter } from 'events';
-import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { childLogger } from './logger';
@@ -147,42 +146,10 @@ export class WhatsAppWebClient extends EventEmitter {
       this.businessId
     );
     try {
-      // Defensively nuke any phantom state at this path BEFORE we try
-      // to create a directory there. WSL's 9P filesystem (the
-      // /mnt/c/... bind mount) can leave a path in a split-brain state
-      // where Node's fs APIs see the directory as missing while Linux's
-      // mkdir reports "Already exists" — a leftover from a previous
-      // operator-side delete (Remove-Item, rm -rf) that 9P hasn't
-      // fully reconciled. Removing first gives us a known-clean slate
-      // before recreating.
-      //
-      // Cost: any existing LocalAuth session data is wiped. Re-pairing
-      // via QR is required for previously-linked salons. Acceptable for
-      // our current state (the 3 working salons were already showing
-      // Runtime.callFunctionOn / ERR_TIMED_OUT and needed re-linking
-      // anyway). For production we'd gate this on a per-salon "first
-      // time" flag — TODO post-demo.
-      fs.rmSync(absoluteSessionDir, {
-        recursive: true,
-        force: true,
-      });
-
-      // Use the shell's `mkdir -p` rather than fs.mkdirSync.
-      //
-      // On WSL2, fs.mkdirSync over the /mnt/c/... 9P bind mount hits
-      // a quirk where creating a directory whose path was just deleted
-      // returns ENOENT (NTFS metadata cache in the 9P layer conflicts
-      // with the new inode). The native `mkdir -p` binary on the WSL
-      // Linux side bypasses that translation and creates the dir
-      // cleanly. This is a single spawn per salon at construction
-      // time (~50ms), so the cost is negligible.
-      execSync(`mkdir -p ${JSON.stringify(localAuthDir)}`, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      // Node's recursive mkdir is idempotent and works on every platform.
+      fs.mkdirSync(localAuthDir, { recursive: true });
       // Defensive: sanity-check the directory really exists before
-      // handing control to whatsapp-web.js. If execSync says success
-      // but we can't observe the dir, the catch block below will
-      // surface a useful diagnostic.
+      // handing control to whatsapp-web.js.
       const verifyStat = fs.lstatSync(localAuthDir);
       if (!verifyStat.isDirectory()) {
         throw new Error(
