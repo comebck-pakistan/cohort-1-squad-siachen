@@ -17,6 +17,7 @@ import dashboardRouter from './routes/dashboard';
 import superadminRouter from './routes/superadmin';
 import onboardingRouter from './routes/onboarding';
 import bridgeRouter from './routes/bridge';
+import publicOnboardingRouter from './routes/public-onboarding';
 import { logger, childLogger } from './lib/logger';
 
 // ---------------------------------------------------------------------------
@@ -92,7 +93,7 @@ app.use(
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   })
 );
-app.use(express.json());
+app.use(express.json({ limit: '15mb' }));
 
 // Health endpoint — reports transport + per-salon session snapshot.
 // Production-grade: external uptime monitors hit this.
@@ -127,6 +128,7 @@ app.use('/api', superadminRouter);
 // becomes reachable. Used by bridge/src/bridge-client.ts for active-businesses
 // discovery and inbound-message delivery.
 app.use('/api', bridgeRouter);
+app.use('/api', publicOnboardingRouter);
 // Onboarding proxy — /onboarding/:id/* is forwarded to the bridge service
 // (Phase 1). Mounted at root because the path is part of the URL space shared
 // with the bridge's own QR server.

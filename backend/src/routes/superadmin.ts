@@ -39,6 +39,7 @@ const requireSuperadmin: RequestHandler = async (req, res, next) => {
   if (!req.user) {
     return res.status(401).json({ error: 'Not authenticated' });
   }
+  if (req.user.isSuperadmin) return next();
   const supabase = getSupabase();
   const { data: profile } = await supabase
     .from('profiles')

@@ -166,6 +166,7 @@ router.post('/auth/signup-tenant', async (req: Request, res: Response) => {
     owner_name,
     owner_email,
     owner_phone,
+    owner_password,
     whatsapp_number,
     city,
     business_type = 'salon',
@@ -175,6 +176,7 @@ router.post('/auth/signup-tenant', async (req: Request, res: Response) => {
     owner_name?: string;
     owner_email?: string;
     owner_phone?: string;
+    owner_password?: string;
     whatsapp_number?: string;
     city?: string;
     business_type?: string;
@@ -212,7 +214,10 @@ router.post('/auth/signup-tenant', async (req: Request, res: Response) => {
       : 'salon');
 
   // ---- Step 1: Create auth user via Admin API ----------------------------
-  const tempPassword = generateTempPassword();
+  if (owner_password && owner_password.length < 8) {
+    return res.status(400).json({ error: 'owner_password must be at least 8 characters' });
+  }
+  const tempPassword = owner_password || generateTempPassword();
   const supabase = getSupabase();
 
   const { data: created, error: createErr } =
@@ -350,7 +355,7 @@ router.post('/auth/signup-tenant', async (req: Request, res: Response) => {
       business_name,
       business_id: businessId,
       auth_user_id: userId,
-      temp_password: tempPassword,
+      temp_password: owner_password ? '[user supplied]' : tempPassword,
     },
     '🔐 NEW TENANT CREDENTIALS — copy these into the demo "email sent" screen'
   );
@@ -361,7 +366,7 @@ router.post('/auth/signup-tenant', async (req: Request, res: Response) => {
     business_name: biz.name,
     business_type: biz.business_type,
     email: owner_email,
-    temp_password: tempPassword,
+    ...(owner_password ? {} : { temp_password: tempPassword }),
     delivery: 'console',
     // In production this would be 'email' or 'whatsapp' and the password
     // would NOT be in the response.

@@ -47,7 +47,7 @@ async function forward(
       timeout: 10_000,
     });
 
-    const ct = response.headers['content-type'] || '';
+    const ct = String(response.headers['content-type'] || '');
     if (ct.includes('application/json')) {
       res.status(response.status).type('application/json').send(response.data);
     } else {
