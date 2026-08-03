@@ -20,26 +20,25 @@ export const Route = createFileRoute("/superadmin/login")({
 });
 
 function AdminLogin() {
-  const { login, isAuthenticated, isReady } = useAuth();
+  const { loginSuperadmin, user, isReady } = useAuth();
   const navigate = useNavigate();
   const redirect = useRouterState({
     select: (s) => (s.location.search as { redirect?: string })?.redirect,
   });
-  const [email, setEmail] = useState("admin@recepta.pk");
-  const [password, setPassword] = useState("admin123");
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (isReady && isAuthenticated) {
+    if (isReady && user?.role === "superadmin") {
       navigate({ to: redirect ?? "/superadmin" });
     }
-  }, [isReady, isAuthenticated, redirect, navigate]);
+  }, [isReady, user, redirect, navigate]);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     try {
-      const user = await login(email, password);
+      const user = await loginSuperadmin(password);
       toast.success(`Welcome, ${user.name}`);
       navigate({ to: redirect ?? "/superadmin" });
     } catch (err) {
@@ -68,16 +67,6 @@ function AdminLogin() {
         </p>
         <form onSubmit={onSubmit} className="mt-6 space-y-4">
           <div>
-            <Label>Email</Label>
-            <Input
-              className="mt-1.5 h-11"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              autoComplete="email"
-            />
-          </div>
-          <div>
             <Label>Password</Label>
             <Input
               className="mt-1.5 h-11"
@@ -97,7 +86,7 @@ function AdminLogin() {
           </Button>
         </form>
         <p className="mt-4 text-center text-xs text-muted-foreground">
-          Demo: admin@recepta.pk / admin123
+          Enter the configured superadmin access secret.
         </p>
       </div>
     </div>

@@ -33,6 +33,7 @@ interface AuthState {
   isReady: boolean;
   /** Real Supabase sign-in. Throws on bad credentials. */
   login: (email: string, password: string) => Promise<AdminUser>;
+  loginSuperadmin: (secret: string) => Promise<AdminUser>;
   logout: () => Promise<void>;
   /** Current access token (for api.ts to attach to requests). */
   getToken: () => Promise<string | null>;
@@ -42,6 +43,7 @@ const AuthContext = createContext<AuthState | null>(null);
 
 const ROLE_STORAGE_KEY = "recepta.admin.role";
 const NAME_STORAGE_KEY = "recepta.admin.name";
+const SUPERADMIN_TOKEN_KEY = "recepta.superadmin.token";
 
 /**
  * Look up the caller's profile.role from our backend.
@@ -84,6 +86,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      const superadminToken = localStorage.getItem(SUPERADMIN_TOKEN_KEY);
+      if (superadminToken) {
+        try {
+          const API = (import.meta.env.VITE_API_URL as string) || "";
+          const response = await fetch(`${API}/api/auth/superadmin-session`, {
+            headers: { Authorization: `Bearer ${superadminToken}` },
+          });
+          if (response.ok) {
+            setUser({ id: "superadmin-secret", email: "", name: "Superadmin", role: "superadmin" });
+            setIsReady(true);
+            return;
+          }
+        } catch {}
+        localStorage.removeItem(SUPERADMIN_TOKEN_KEY);
+      }
       // Restore session from Supabase's localStorage on page load.
       const { data } = await supabase().auth.getSession();
       if (cancelled) return;
@@ -145,16 +162,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
     localStorage.removeItem(ROLE_STORAGE_KEY);
     localStorage.removeItem(NAME_STORAGE_KEY);
+    localStorage.removeItem(SUPERADMIN_TOKEN_KEY);
+  };
+
+  const loginSuperadmin = async (secret: string): Promise<AdminUser> => {
+    const API = (import.meta.env.VITE_API_URL as string) || "";
+    const response = await fetch(`${API}/api/auth/superadmin-login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ secret }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.token) throw new Error(result.error || "Invalid superadmin secret");
+    localStorage.setItem(SUPERADMIN_TOKEN_KEY, result.token);
+    const admin: AdminUser = { id: "superadmin-secret", email: "", name: "Superadmin", role: "superadmin" };
+    setUser(admin);
+    return admin;
   };
 
   const getToken = async (): Promise<string | null> => {
+    const superadminToken = localStorage.getItem(SUPERADMIN_TOKEN_KEY);
+    if (superadminToken) return superadminToken;
     const { data } = await supabase().auth.getSession();
     return data.session?.access_token ?? null;
   };
 
   return (
     <AuthContext.Provider
-      value={{ user, isAuthenticated: !!user, isReady, login, logout, getToken }}
+      value={{ user, isAuthenticated: !!user, isReady, login, loginSuperadmin, logout, getToken }}
     >
       {children}
     </AuthContext.Provider>

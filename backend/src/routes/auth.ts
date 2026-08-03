@@ -26,8 +26,26 @@
 import { Router, Request, Response } from 'express';
 import { getSupabase } from '../lib/supabase';
 import { requireAuth } from '../lib/auth';
+import { createSuperadminToken } from '../lib/auth';
+import { timingSafeEqual } from 'crypto';
 
 const router = Router();
+
+router.post('/auth/superadmin-login', (req: Request, res: Response) => {
+  const configured = process.env.SUPERADMIN_SECRET || '';
+  const submitted = typeof req.body?.secret === 'string' ? req.body.secret : '';
+  const a = Buffer.from(configured);
+  const b = Buffer.from(submitted);
+  if (!configured || a.length !== b.length || !timingSafeEqual(a, b)) {
+    return res.status(401).json({ error: 'Invalid superadmin secret' });
+  }
+  return res.json({ token: createSuperadminToken(), expires_in: 8 * 60 * 60 });
+});
+
+router.get('/auth/superadmin-session', requireAuth, (req: Request, res: Response) => {
+  if (!req.user?.isSuperadmin) return res.status(403).json({ error: 'Superadmin access required' });
+  return res.json({ role: 'superadmin' });
+});
 
 router.get('/auth/me', requireAuth, async (req: Request, res: Response) => {
   if (!req.user) return res.status(401).json({ error: 'Not authenticated' });

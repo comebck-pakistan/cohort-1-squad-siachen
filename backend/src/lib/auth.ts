@@ -16,12 +16,40 @@
 // ---------------------------------------------------------------------------
 
 import { Request, Response, NextFunction, RequestHandler } from 'express';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { getSupabase } from './supabase';
 
 export interface AuthedUser {
   id: string;
   email: string;
   businessId: string | null; // populated by requireOwnerBusiness
+  isSuperadmin?: boolean;
+}
+
+const SUPERADMIN_ID = 'superadmin-secret';
+
+export function createSuperadminToken(): string {
+  const secret = process.env.SUPERADMIN_SECRET;
+  if (!secret) throw new Error('SUPERADMIN_SECRET is not configured');
+  const payload = Buffer.from(JSON.stringify({ sub: SUPERADMIN_ID, exp: Date.now() + 8 * 60 * 60 * 1000 })).toString('base64url');
+  const signature = createHmac('sha256', secret).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
+}
+
+export function verifySuperadminToken(token: string): boolean {
+  const secret = process.env.SUPERADMIN_SECRET;
+  const [payload, signature] = token.split('.');
+  if (!secret || !payload || !signature) return false;
+  const expected = createHmac('sha256', secret).update(payload).digest('base64url');
+  const a = Buffer.from(signature);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return false;
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return data.sub === SUPERADMIN_ID && typeof data.exp === 'number' && data.exp > Date.now();
+  } catch {
+    return false;
+  }
 }
 
 declare module 'express-serve-static-core' {
@@ -98,6 +126,10 @@ export const requireAuth: RequestHandler = async (
   }
 
   try {
+    if (verifySuperadminToken(token)) {
+      req.user = { id: SUPERADMIN_ID, email: 'superadmin@recepta.local', businessId: null, isSuperadmin: true };
+      return next();
+    }
     const u = await verifyToken(token);
     const businessId = await loadBusinessIdForUser(u.id);
     req.user = { ...u, businessId };

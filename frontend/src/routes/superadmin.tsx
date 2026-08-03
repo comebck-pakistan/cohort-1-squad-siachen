@@ -22,20 +22,20 @@ export const Route = createFileRoute("/superadmin")({
 });
 
 function AdminLayout() {
-  const { isAuthenticated, isReady } = useAuth();
+  const { user, isReady } = useAuth();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const navigate = useNavigate();
   const isLoginRoute = pathname === "/superadmin/login";
 
   useEffect(() => {
     if (!isReady) return;
-    if (!isAuthenticated && !isLoginRoute) {
+    if (user?.role !== "superadmin" && !isLoginRoute) {
       navigate({ to: "/superadmin/login", search: { redirect: pathname } });
     }
-  }, [isReady, isAuthenticated, isLoginRoute, pathname, navigate]);
+  }, [isReady, user, isLoginRoute, pathname, navigate]);
 
   if (!isReady) return null;
-  if (isLoginRoute || !isAuthenticated) return <Outlet />;
+  if (isLoginRoute || user?.role !== "superadmin") return <Outlet />;
 
 
   return (
