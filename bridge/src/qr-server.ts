@@ -195,8 +195,8 @@ export function createOnboardingRouter(manager: SessionManager): Router {
   // DELETE /onboarding/:businessId/session
   //
   // Disconnects the salon — useful when the owner wants to unpair their
-  // phone (e.g. lost device, switching staff). Destroys the client, which
-  // closes the underlying Chromium session.
+  // phone (e.g. lost device, switching staff). Logs out from WhatsApp's
+  // servers, then closes the underlying Chromium session.
   // -------------------------------------------------------------------------
   router.delete(
     '/onboarding/:businessId/session',
@@ -209,7 +209,7 @@ export function createOnboardingRouter(manager: SessionManager): Router {
           .json({ error: 'No active session for this business' });
       }
       try {
-        await manager.unregisterClient(businessId);
+        await manager.logoutClient(businessId);
         return res.json({ disconnected: true, businessId });
       } catch (e) {
         log.error(

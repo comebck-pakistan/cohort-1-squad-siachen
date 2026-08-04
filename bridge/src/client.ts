@@ -2,8 +2,9 @@ import { Client, LocalAuth, Message } from 'whatsapp-web.js';
 import { EventEmitter } from 'events';
 import fs from 'fs';
 import path from 'path';
+import { execFile } from 'child_process';
 import { childLogger } from './logger';
-import { clearChromiumLocks } from './clear-locks';
+import { clearChromiumLocks, clearChromiumLocksWithRetry } from './clear-locks';
 import { deliverInboundMessage } from './bridge-client';
 
 // ---------------------------------------------------------------------------
@@ -85,6 +86,8 @@ export interface WhatsAppWebClientOptions {
 const MAX_RECONNECT_ATTEMPTS = 3;
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
+const BROWSER_CLOSE_TIMEOUT_MS = 5_000;
+const PROFILE_RELEASE_DELAY_MS = 300;
 
 export class WhatsAppWebClient extends EventEmitter {
   private readonly businessId: string;
@@ -97,6 +100,8 @@ export class WhatsAppWebClient extends EventEmitter {
   private isDestroying = false;
   private reconnectAttempts = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private browserTeardown: Promise<void> | null = null;
+  private reconnectPreparation: Promise<void> | null = null;
 
   constructor(options: WhatsAppWebClientOptions) {
     super();
@@ -306,8 +311,15 @@ export class WhatsAppWebClient extends EventEmitter {
         { businessId: this.businessId, reason },
         'disconnected from whatsapp'
       );
+      // logout()/destroy() can emit this event while intentionally closing.
+      // Do not overwrite the terminal status or start a reconnect in that case.
+      if (this.isDestroying) return;
       this.setStatus('disconnected');
-      this.attemptReconnect();
+      if (!this.reconnectPreparation) {
+        this.reconnectPreparation = this.prepareReconnect().finally(() => {
+          this.reconnectPreparation = null;
+        });
+      }
     });
 
     this.client.on('message', (msg: Message) => {
@@ -374,6 +386,20 @@ export class WhatsAppWebClient extends EventEmitter {
   // Reconnection — exponential backoff, capped attempts
   // -------------------------------------------------------------------------
 
+  private async prepareReconnect(): Promise<void> {
+    if (this.isDestroying) return;
+    try {
+      await this.closeBrowser();
+      await clearChromiumLocksWithRetry(this.sessionDir);
+    } catch (e) {
+      log.warn(
+        { businessId: this.businessId, err: (e as Error).message },
+        'browser cleanup before reconnect failed'
+      );
+    }
+    this.attemptReconnect();
+  }
+
   private attemptReconnect(): void {
     if (this.isDestroying) return;
 
@@ -404,8 +430,9 @@ export class WhatsAppWebClient extends EventEmitter {
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (this.isDestroying) return;
-      this.client
-        .initialize()
+      this.closeBrowser()
+        .then(() => clearChromiumLocksWithRetry(this.sessionDir))
+        .then(() => this.client.initialize())
         .then(() => {
           log.info(
             { businessId: this.businessId },
@@ -427,6 +454,54 @@ export class WhatsAppWebClient extends EventEmitter {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+  }
+
+  private closeBrowser(): Promise<void> {
+    if (this.browserTeardown) return this.browserTeardown;
+    this.browserTeardown = (async () => {
+      const browser = this.client.pupBrowser;
+      if (!browser?.isConnected()) return;
+      const pid = browser.process()?.pid;
+      let timeout: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          this.client.destroy(),
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(
+              () => reject(new Error('browser close timed out')),
+              BROWSER_CLOSE_TIMEOUT_MS
+            );
+          }),
+        ]);
+      } catch (e) {
+        log.warn(
+          { businessId: this.businessId, pid, err: (e as Error).message },
+          'graceful browser close failed; force-killing chromium'
+        );
+        await this.forceKillBrowser(pid);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, PROFILE_RELEASE_DELAY_MS));
+    })().finally(() => {
+      this.browserTeardown = null;
+    });
+    return this.browserTeardown;
+  }
+
+  private async forceKillBrowser(pid?: number): Promise<void> {
+    if (!pid) return;
+    if (process.platform === 'win32') {
+      await new Promise<void>((resolve) => {
+        execFile('taskkill', ['/PID', String(pid), '/T', '/F'], () => resolve());
+      });
+      return;
+    }
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ESRCH') throw e;
     }
   }
 
@@ -503,6 +578,39 @@ export class WhatsAppWebClient extends EventEmitter {
   }
 
   /**
+   * Explicitly unlink this Web session from WhatsApp, then tear Chromium
+   * down. Unlike destroy(), logout() notifies WhatsApp and removes LocalAuth
+   * credentials, so the device disappears from the phone's Linked Devices.
+   */
+  async logout(): Promise<void> {
+    if (this.isDestroying) {
+      throw new Error('WhatsAppWebClient: logout already in progress');
+    }
+    this.isDestroying = true;
+    this.clearReconnectTimer();
+    this.setStatus('destroyed');
+
+    let logoutError: Error | null = null;
+    try {
+      await this.client.logout();
+      log.info({ businessId: this.businessId }, 'whatsapp session logged out');
+    } catch (e) {
+      logoutError = e as Error;
+      log.error(
+        { businessId: this.businessId, err: logoutError.message },
+        'whatsapp logout failed'
+      );
+    } finally {
+      // logout() normally closes Chromium itself. This handles partial
+      // failures and ensures no process retains the LocalAuth profile.
+      await this.closeBrowser();
+      await clearChromiumLocksWithRetry(this.sessionDir);
+    }
+
+    if (logoutError) throw logoutError;
+  }
+
+  /**
    * Gracefully tear down the Client. Called on SIGTERM/SIGINT or when
    * removing a salon from the session manager. Idempotent — safe to call
    * multiple times.
@@ -517,7 +625,8 @@ export class WhatsAppWebClient extends EventEmitter {
     this.setStatus('destroyed');
 
     try {
-      await this.client.destroy();
+      await this.closeBrowser();
+      await clearChromiumLocksWithRetry(this.sessionDir);
       log.info({ businessId: this.businessId }, 'client destroyed cleanly');
     } catch (e) {
       log.warn(

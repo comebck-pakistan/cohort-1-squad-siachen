@@ -32,7 +32,10 @@ const LOCK_FILE_BASENAMES: ReadonlySet<string> = new Set([
   'SingletonCookie',
   'SingletonCookieExpire',
   'SingletonSocket',
+  'first_party_sets.db-journal',
 ]);
+
+const RETRYABLE_LOCK_ERROR_CODES = ['EBUSY', 'EPERM', 'EACCES'];
 
 /**
  * Chromium also creates IPC socket files named like
@@ -93,6 +96,27 @@ export function clearChromiumLocks(sessionDir: string): ClearLocksResult {
   }
 
   return result;
+}
+
+/** Retry cleanup while Windows releases Chromium's profile handles. */
+export async function clearChromiumLocksWithRetry(
+  sessionDir: string,
+  attempts = 5,
+  delayMs = 250
+): Promise<ClearLocksResult> {
+  const combined: ClearLocksResult = { cleared: [], errors: [] };
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const result = clearChromiumLocks(sessionDir);
+    combined.cleared.push(...result.cleared);
+    combined.errors = result.errors;
+    const retryable = result.errors.some((error) =>
+      RETRYABLE_LOCK_ERROR_CODES.some((code) => error.includes(code))
+    );
+    if (!retryable || attempt === attempts) return combined;
+    log.debug({ sessionDir, attempt, delayMs }, 'profile still locked; retrying cleanup');
+    await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+  }
+  return combined;
 }
 
 function walk(
