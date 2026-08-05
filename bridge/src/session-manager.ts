@@ -237,6 +237,19 @@ export class SessionManager extends EventEmitter {
     log.info({ businessId }, 'client unregistered');
   }
 
+  /** Explicit user-requested unlink. This notifies WhatsApp before removal. */
+  async logoutClient(businessId: string): Promise<void> {
+    const client = this.clients.get(businessId);
+    if (!client) {
+      log.debug({ businessId }, 'logoutClient: not registered; no-op');
+      return;
+    }
+
+    await client.logout();
+    this.clients.delete(businessId);
+    log.info({ businessId }, 'client logged out and unregistered');
+  }
+
   // -------------------------------------------------------------------------
   // Read-only accessors
   // -------------------------------------------------------------------------
