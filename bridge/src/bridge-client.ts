@@ -27,7 +27,11 @@ const log = {
 
 const http = axios.create({
   baseURL: BACKEND_URL,
-  timeout: 30_000,
+  // No default timeout — callers specify per-call via options.timeoutMs.
+  // We removed the 30s default because the bridge's retry loop now
+  // passes tighter per-attempt timeouts (10s) so retries can complete
+  // inside a reasonable budget. The old 30s default overrode any
+  // per-call override and made retry useless.
   headers: {
     'X-Bridge-Token': BRIDGE_TOKEN,
     'Content-Type': 'application/json',
@@ -76,12 +80,25 @@ export interface BridgeInboundMessage {
  * validation errors — those are surfaced as exceptions with the response
  * body's `error` field in the message.
  */
+export interface DeliverOptions {
+  /**
+   * Per-call timeout in ms. Default: 10_000 (was 30_000 before the
+   * retry loop was added). The retry loop in client.ts overrides this
+   * to fit 3 attempts inside a reasonable budget.
+   */
+  timeoutMs?: number;
+}
+
+const DEFAULT_DELIVERY_TIMEOUT_MS = 10_000;
+
 export async function deliverInboundMessage(
-  msg: BridgeInboundMessage
+  msg: BridgeInboundMessage,
+  options: DeliverOptions = {}
 ): Promise<{ reply: string | null }> {
   const { data } = await http.post<{ reply: string | null }>(
     '/api/bridge/inbound',
-    msg
+    msg,
+    { timeout: options.timeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS }
   );
   return { reply: data?.reply ?? null };
 }
