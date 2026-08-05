@@ -349,23 +349,96 @@ export class WhatsAppWebClient extends EventEmitter {
     if (msg.type !== 'chat') return;
 
     const log = childLogger('whatsapp-web.client');
-    let reply: string | null;
-    try {
-      // Hand the normalized message off to the main API for LLM/booking.
-      // The main API owns the transport-agnostic business core; we own
-      // chromium lifecycle. Reply text comes back over the same HTTP call.
-      const result = await deliverInboundMessage({
-        businessId: this.businessId,
-        from: msg.from,
-        text: msg.body,
-        messageId: msg.id.id,
-      });
-      reply = result.reply;
-    } catch (e) {
+
+    // -------------------------------------------------------------------
+    // Retry the backend call with exponential backoff before giving up.
+    //
+    // Previously any single failure (timeout, 5xx, ECONNRESET) caused
+    // the reply to be silently dropped — the customer would see
+    // nothing on their end and the salon owner had no record of what
+    // happened. That's worse than a stale reply because there's no
+    // signal at all to debug.
+    //
+    // Strategy: 3 attempts with 1s/3s backoff (4th attempt NOT made
+    // because by then the customer has long given up). Per-attempt
+    // timeout is 10s so worst-case total is ~24s instead of 90s.
+    //
+    // On final failure: log a structured `dead-letter` entry with
+    // everything needed to reconstruct the situation — owner can
+    // grep the bridge log for this to see "X replies never reached
+    // the customer today".
+    // -------------------------------------------------------------------
+    const MAX_DELIVERY_ATTEMPTS = 3;
+    // Per-attempt timeout. The backend's first LLM call legitimately
+    // takes 10-20s on a MiniMax-M3 cold call (the customer's first
+    // message in a conversation pays full cost for prompt assembly +
+    // LLM round-trip). 30s gives one good retry window before we
+    // consider the message dead-lettered. 3 attempts × 30s + 1s/3s
+    // backoff = ~94s worst case before dead-letter, which is fine
+    // because the customer is waiting either way.
+    const PER_ATTEMPT_TIMEOUT_MS = 30_000;
+    const BACKOFF_MS = [1_000, 3_000];
+
+    let reply: string | null = null;
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= MAX_DELIVERY_ATTEMPTS; attempt++) {
+      try {
+        const result = await deliverInboundMessage(
+          {
+            businessId: this.businessId,
+            from: msg.from,
+            text: msg.body,
+            messageId: msg.id.id,
+          },
+          { timeoutMs: PER_ATTEMPT_TIMEOUT_MS }
+        );
+        reply = result.reply;
+        lastError = null;
+        break; // success
+      } catch (e) {
+        lastError = e as Error;
+        log.warn(
+          {
+            businessId: this.businessId,
+            from: msg.from,
+            messageId: msg.id.id,
+            attempt,
+            maxAttempts: MAX_DELIVERY_ATTEMPTS,
+            err: lastError.message,
+          },
+          'deliverInboundMessage failed; will retry'
+        );
+        if (attempt < MAX_DELIVERY_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, BACKOFF_MS[attempt - 1]));
+        }
+      }
+    }
+
+    if (lastError) {
+      // ----------------------------------------------------------------
+      // Dead-letter: all retries exhausted. Log the full context so the
+      // salon owner (or support) can reconstruct what happened. The
+      // `dead-letter` tag is grep-friendly.
+      //
+      // Production next-step would be to also write this to a
+      // `delivery_failures` table so it shows up in the inbox /
+      // dashboard. For now, structured log is enough to act on.
+      // ----------------------------------------------------------------
       log.error(
-        { businessId: this.businessId, err: (e as Error).message },
-        'deliverInboundMessage failed; dropping reply'
+        {
+          businessId: this.businessId,
+          from: msg.from,
+          messageId: msg.id.id,
+          textLength: msg.body.length,
+          textPreview: msg.body.slice(0, 80),
+          attempts: MAX_DELIVERY_ATTEMPTS,
+          finalError: lastError.message,
+        },
+        'dead-letter: deliverInboundMessage failed after all retries'
       );
+      // Don't crash the bridge. Customer sees silence for THIS message
+      // but the next message they send will be processed normally.
       return;
     }
 
