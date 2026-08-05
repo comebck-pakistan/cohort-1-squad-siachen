@@ -35,6 +35,45 @@ import { childLogger } from './logger';
 // identical across paths.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Per-conversation serialization lock.
+//
+// WhatsApp can deliver two messages from the same customer back-to-back
+// (e.g. "hi" then "what services do you offer" sent 2s apart). Without
+// serialization, both calls to handleIncomingMessage run concurrently,
+// both read the same conversation_state, both call the LLM, and the
+// responses can land in the wrong order — the customer sees the second
+// message's reply attached to the first question.
+//
+// This Map<customerKey, Promise> chains every call for the same customer
+// so they run strictly in order. Calls for DIFFERENT customers still run
+// in parallel. Latency cost is per-customer, not global — adds delay
+// only when the same person double-texts fast, which is exactly the case
+// we're fixing correctness for.
+//
+// In-process only. If we ever run multiple backend replicas, this needs
+// to move to a Redis-backed lock. Single backend process per environment
+// for now, so this is sufficient.
+// ---------------------------------------------------------------------------
+
+const inflightByCustomer = new Map<string, Promise<unknown>>();
+
+async function withCustomerLock<T>(
+  customerKey: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const prev = inflightByCustomer.get(customerKey) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  inflightByCustomer.set(customerKey, next);
+  try {
+    return await next;
+  } finally {
+    if (inflightByCustomer.get(customerKey) === next) {
+      inflightByCustomer.delete(customerKey);
+    }
+  }
+}
+
 const log = childLogger('message-handler');
 
 export interface IncomingMessageOptions {
@@ -104,6 +143,17 @@ function normalizePhone(raw: string): string {
  *     so the customer never sees a generic error.
  */
 export async function handleIncomingMessage(
+  opts: IncomingMessageOptions
+): Promise<HandleResult> {
+  // Per-customer serialization: see withCustomerLock above. We use
+  // businessId + normalized phone as the lock key so calls from the
+  // same (business, customer) chain in order, while different
+  // customers still run in parallel.
+  const customerKey = `${opts.businessId}:${normalizePhone(opts.from)}`;
+  return withCustomerLock(customerKey, () => handleIncomingMessageInner(opts));
+}
+
+async function handleIncomingMessageInner(
   opts: IncomingMessageOptions
 ): Promise<HandleResult> {
   const { businessId, from, text } = opts;
