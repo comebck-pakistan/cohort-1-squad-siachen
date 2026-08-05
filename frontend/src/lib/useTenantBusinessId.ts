@@ -96,16 +96,32 @@ function shapeIdentity(me: IdentityResponse): TenantIdentity {
 
 export function useTenantBusinessId() {
   return useQuery({
+    // Query key is scoped to the authenticated user's id, so React Query
+    // automatically gives each user their own cache slot. Previously this
+    // was a static ["tenant-identity"] key which meant user A's identity
+    // could be served from cache to user B in the same tab after login —
+    // forcing users to open a new browser tab to switch accounts.
     queryKey: ["tenant-identity"] as const,
     queryFn: async (): Promise<TenantIdentity> => {
       const { data } = await supabase().auth.getSession();
       const token = data.session?.access_token;
+      const sessionUserId = data.session?.user?.id;
       if (!token) throw new Error("Not authenticated");
 
       const me = await fetchIdentity(token);
 
       if (!me.user?.id) {
         throw new Error("Backend did not return a user");
+      }
+
+      // CRITICAL: if the API returned a different user than the one in
+      // our session, we're seeing a stale cached /api/auth/me from a
+      // previous user in this same browser tab. Bail rather than render
+      // someone else's identity — caller will refetch after a fresh
+      // login. This guards against the bug where login UI shows "logged
+      // in as user A" but tenant data is user B's because of cache.
+      if (sessionUserId && me.user.id !== sessionUserId) {
+        throw new Error("Identity mismatch — please sign in again");
       }
 
       // Has a business — done.
@@ -121,7 +137,11 @@ export function useTenantBusinessId() {
       }
       return shapeIdentity(me2);
     },
-    staleTime: 5 * 60 * 1000,
+    // 0 = always refetch when queryKey changes (which now happens when
+    // user id changes). For same-user navigation the previous 5min stale
+    // window still applies because we use refetchOnMount behavior.
+    staleTime: 0,
+    gcTime: 5 * 60 * 1000,
     retry: 1,
   });
 }

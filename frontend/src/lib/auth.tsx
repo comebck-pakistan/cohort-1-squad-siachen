@@ -137,6 +137,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = async (email: string, password: string): Promise<AdminUser> => {
+    // CRITICAL: clear any prior session before signing in. Without this,
+    // if user A logged in earlier in the same browser tab and user B now
+    // tries to log in, the Supabase JS client may keep the old session
+    // tokens around and /api/auth/me will return user A's business
+    // because the request happens to use the stale access_token for a
+    // brief window. This is what forced users to open a new tab to switch
+    // accounts — fix is to fully sign out the prior user first.
+    try {
+      await supabase().auth.signOut();
+    } catch {
+      // ignore — no prior session is fine
+    }
+    // Also clear any localStorage cached role/name so they don't leak
+    // between users in the same tab before /api/auth/me resolves.
+    try {
+      localStorage.removeItem(ROLE_STORAGE_KEY);
+      localStorage.removeItem(NAME_STORAGE_KEY);
+      localStorage.removeItem(SUPERADMIN_TOKEN_KEY);
+    } catch {
+      // localStorage may be disabled (SSR / private mode) — non-fatal
+    }
+
     const { data, error } = await supabase().auth.signInWithPassword({
       email,
       password,
