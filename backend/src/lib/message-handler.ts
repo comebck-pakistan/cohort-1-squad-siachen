@@ -5,6 +5,7 @@ import {
   getSalonContext,
   updateConversationState,
   touchConversation,
+  recordEscalation,
 } from './db';
 import { generateReply } from './llm';
 import { processBookingDecision } from './booking';
@@ -160,6 +161,46 @@ export async function handleIncomingMessage(
       salonContext,
       conversationStatePrompt,
     });
+
+    // Step 5b: escalation — record an escalation_events row when the
+    // LLM flags intent='complaint' or when its confidence is so low
+    // (and the intent isn't a booking action) that the salon owner
+    // should probably step in. Dashboard reads from this table but
+    // nothing was writing to it until now.
+    if (conversationId) {
+      try {
+        if (llmResult.intent === 'complaint') {
+          await recordEscalation(
+            conversationId,
+            'customer_complaint',
+            llmResult.reply
+          );
+          requestLog.info(
+            { conversationId },
+            'escalation recorded: customer_complaint'
+          );
+        } else if (
+          llmResult.confidence < 30 &&
+          !['book', 'cancel', 'reschedule'].includes(llmResult.intent)
+        ) {
+          await recordEscalation(
+            conversationId,
+            'low_confidence',
+            llmResult.reply
+          );
+          requestLog.info(
+            { conversationId, confidence: llmResult.confidence },
+            'escalation recorded: low_confidence'
+          );
+        }
+      } catch (e) {
+        // Non-fatal — escalation logging shouldn't break the reply.
+        requestLog.warn(
+          { err: (e as Error).message },
+          'escalation recording failed (non-fatal)'
+        );
+      }
+    }
 
     // Step 6: booking decision (only if we have a conversationId for state writes)
     if (conversationId && customerId) {
