@@ -2,6 +2,9 @@ import {
   createAppointmentIfValid,
   AppointmentOutcome,
   updateConversationState,
+  getConversationState,
+  rescheduleAppointment,
+  cancelUpcomingAppointment,
 } from './db';
 import type { GenerateReplyResult } from './llm';
 
@@ -125,7 +128,13 @@ function formatFailure(
     case 'outside_hours':
       return `Sorry — ${outcome.detail}. Would you like to pick a different day or time?`;
     case 'past_time':
-      return `That time has already passed. What about later today or tomorrow?`;
+      // The DB layer only returns this when start_time < now AND the date
+      // matches today (parseLocalDateTime produces a future datetime when
+      // the date is in the future, so a past_time on a future date is
+      // already impossible). So this branch is by definition today-only.
+      // Suggest alternatives rather than the old "later today or tomorrow"
+      // which the LLM was echoing verbatim 3 times in a row.
+      return `That time has already passed for today. Pick a later time today, or I can show you tomorrow's available slots — just say the word.`;
     case 'slot_taken': {
       const alt =
         outcome.suggestions.length > 0
@@ -175,6 +184,14 @@ export async function processBookingDecision(
 
   // Step 1: only proceed for booking intent
   if (llmResult.intent !== 'book') {
+    // Reschedule / cancel are handled below as soon as we have slots (or
+    // for cancel, even without — "cancel" doesn't need a new time).
+    if (llmResult.intent === 'cancel') {
+      return await handleCancel(llmResult, ctx);
+    }
+    if (llmResult.intent === 'reschedule') {
+      return await handleReschedule(llmResult, ctx);
+    }
     return { finalReply: llmResult.reply, appointment: null };
   }
 
@@ -200,18 +217,49 @@ export async function processBookingDecision(
     // Non-fatal — continue with booking attempt anyway.
   }
 
+  // Step 3.5: SERVICE-LOCK GUARD — if conversation_state already has a
+  // selected_service from a previous turn AND the LLM just gave us a
+  // partial phrase that doesn't EXACTLY equal it, prefer the locked
+  // value. This prevents the recurring bug where the customer says
+  // "full set" (partial) and findServiceByName() fuzzy-matches
+  // "Acrylic Full Set" instead of the locked "Nail Art Full Set".
+  let effectiveServiceName = llmResult.service_interest!;
+  try {
+    const locked = await getConversationState(ctx.conversationId);
+    if (locked?.service_interest) {
+      const candidate = llmResult.service_interest!.trim();
+      const lockedName = locked.service_interest.trim();
+      if (
+        candidate.toLowerCase() !== lockedName.toLowerCase() &&
+        lockedName.toLowerCase().includes(candidate.toLowerCase())
+      ) {
+        // LLM gave us a substring of the locked value ("full set" inside
+        // "Nail Art Full Set"). Use the locked full name.
+        console.log(
+          '[booking-decision] SERVICE-LOCK: replacing llmService="%s" with locked="%s"',
+          candidate,
+          lockedName
+        );
+        effectiveServiceName = lockedName;
+      }
+    }
+  } catch (e) {
+    console.warn('[booking-decision] service-lock check failed (non-fatal):',
+      (e as Error).message);
+  }
+
   // Step 4: attempt the booking
   let outcome: AppointmentOutcome;
   try {
     console.log('[booking-decision] ATTEMPTING booking for service=%s date=%s time=%s',
-      llmResult.service_interest,
+      effectiveServiceName,
       llmResult.preferred_date,
       llmResult.preferred_time
     );
     outcome = await createAppointmentIfValid({
       businessId: ctx.businessId,
       customerId: ctx.customerId,
-      serviceName: llmResult.service_interest!,
+      serviceName: effectiveServiceName,
       preferredDate: llmResult.preferred_date!,
       preferredTime: llmResult.preferred_time!,
     });
@@ -240,4 +288,138 @@ export async function processBookingDecision(
     : formatFailure(outcome);
 
   return { finalReply, appointment: outcome };
+}
+
+// ---------------------------------------------------------------------------
+// Reschedule handler
+// ---------------------------------------------------------------------------
+
+async function handleReschedule(
+  llmResult: GenerateReplyResult,
+  ctx: BookingDecisionContext
+): Promise<BookingDecisionResult> {
+  // Persist slots so the next "yes 3pm works" is interpreted in context
+  try {
+    await updateConversationState(ctx.conversationId, {
+      current_intent: 'reschedule',
+      preferred_date: llmResult.preferred_date ?? undefined,
+      preferred_time: llmResult.preferred_time ?? undefined,
+    });
+  } catch (e) {
+    console.warn('[booking-decision] reschedule persist failed:', (e as Error).message);
+  }
+
+  // Need both date and time to attempt reschedule. If either is missing,
+  // let the LLM's reply (asking for the missing piece) go through.
+  if (!llmResult.preferred_date || !llmResult.preferred_time) {
+    console.log('[booking-decision] reschedule SKIPPED — missing date/time');
+    return { finalReply: llmResult.reply, appointment: null };
+  }
+
+  try {
+    const outcome = await rescheduleAppointment({
+      businessId: ctx.businessId,
+      customerId: ctx.customerId,
+      preferredDate: llmResult.preferred_date,
+      preferredTime: llmResult.preferred_time,
+    });
+
+    if (outcome.ok) {
+      const newStart = new Date(outcome.newStart);
+      const dateStr = newStart.toLocaleDateString('en-PK', {
+        timeZone: 'Asia/Karachi',
+        weekday: 'short', month: 'short', day: 'numeric',
+      });
+      const timeStr = newStart.toLocaleTimeString('en-PK', {
+        timeZone: 'Asia/Karachi', hour: '2-digit', minute: '2-digit', hour12: true,
+      });
+      return {
+        finalReply:
+          `✅ Rescheduled!\n\n` +
+          `• Service: ${outcome.serviceName}\n` +
+          `• New time: ${dateStr} at ${timeStr}\n` +
+          `• Stylist: ${outcome.staffName}\n\n` +
+          `See you then!`,
+        appointment: null,
+      };
+    }
+
+    // Failure — format per reason
+    if (outcome.reason === 'no_upcoming_appointment') {
+      return {
+        finalReply: `You don't have any upcoming appointments to reschedule. Want to book a new one instead?`,
+        appointment: null,
+      };
+    }
+    if (outcome.reason === 'slot_taken' && outcome.suggestions?.length) {
+      return {
+        finalReply:
+          `Sorry — that new time isn't available. Other times that day: ` +
+          outcome.suggestions.slice(0, 4).map((s) => s.slice(0, 5)).join(', ') +
+          `. Reply with one of those to try again.`,
+        appointment: null,
+      };
+    }
+    return {
+      finalReply: `Sorry — ${outcome.detail}. Could you pick a different day or time?`,
+      appointment: null,
+    };
+  } catch (e) {
+    console.error('[booking-decision] reschedule THREW:', (e as Error).message);
+    return { finalReply: llmResult.reply, appointment: null };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cancel handler
+// ---------------------------------------------------------------------------
+
+async function handleCancel(
+  llmResult: GenerateReplyResult,
+  ctx: BookingDecisionContext
+): Promise<BookingDecisionResult> {
+  try {
+    await updateConversationState(ctx.conversationId, {
+      current_intent: 'cancel',
+    });
+  } catch (e) {
+    console.warn('[booking-decision] cancel persist failed:', (e as Error).message);
+  }
+
+  try {
+    const outcome = await cancelUpcomingAppointment(ctx.businessId, ctx.customerId);
+
+    if (outcome.ok) {
+      const when = outcome.when ? new Date(outcome.when) : null;
+      const whenStr = when
+        ? when.toLocaleString('en-PK', {
+            timeZone: 'Asia/Karachi',
+            weekday: 'short', month: 'short', day: 'numeric',
+            hour: '2-digit', minute: '2-digit', hour12: true,
+          })
+        : '';
+      return {
+        finalReply:
+          `✅ Cancelled.\n\n` +
+          `Your ${outcome.serviceName} appointment${whenStr ? ` for ${whenStr}` : ''} ` +
+          `has been cancelled. Want to book a new one?`,
+        appointment: null,
+      };
+    }
+
+    if (outcome.reason === 'no_upcoming_appointment') {
+      return {
+        finalReply: `You don't have any upcoming appointments to cancel.`,
+        appointment: null,
+      };
+    }
+
+    return {
+      finalReply: `Sorry — ${outcome.detail || "couldn't cancel right now"}. Please try again.`,
+      appointment: null,
+    };
+  } catch (e) {
+    console.error('[booking-decision] cancel THREW:', (e as Error).message);
+    return { finalReply: llmResult.reply, appointment: null };
+  }
 }
