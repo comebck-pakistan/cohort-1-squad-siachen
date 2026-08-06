@@ -2,9 +2,11 @@ import {
   getOrCreateCustomer,
   getOrCreateConversation,
   getConversationStateForPrompt,
+  getUpcomingAppointmentForPrompt,
   getSalonContext,
   updateConversationState,
   touchConversation,
+  recordEscalation,
 } from './db';
 import { generateReply } from './llm';
 import { processBookingDecision } from './booking';
@@ -33,6 +35,45 @@ import { childLogger } from './logger';
 // LLM call, booking decision, error boundaries — lives here and is
 // identical across paths.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Per-conversation serialization lock.
+//
+// WhatsApp can deliver two messages from the same customer back-to-back
+// (e.g. "hi" then "what services do you offer" sent 2s apart). Without
+// serialization, both calls to handleIncomingMessage run concurrently,
+// both read the same conversation_state, both call the LLM, and the
+// responses can land in the wrong order — the customer sees the second
+// message's reply attached to the first question.
+//
+// This Map<customerKey, Promise> chains every call for the same customer
+// so they run strictly in order. Calls for DIFFERENT customers still run
+// in parallel. Latency cost is per-customer, not global — adds delay
+// only when the same person double-texts fast, which is exactly the case
+// we're fixing correctness for.
+//
+// In-process only. If we ever run multiple backend replicas, this needs
+// to move to a Redis-backed lock. Single backend process per environment
+// for now, so this is sufficient.
+// ---------------------------------------------------------------------------
+
+const inflightByCustomer = new Map<string, Promise<unknown>>();
+
+async function withCustomerLock<T>(
+  customerKey: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const prev = inflightByCustomer.get(customerKey) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  inflightByCustomer.set(customerKey, next);
+  try {
+    return await next;
+  } finally {
+    if (inflightByCustomer.get(customerKey) === next) {
+      inflightByCustomer.delete(customerKey);
+    }
+  }
+}
 
 const log = childLogger('message-handler');
 
@@ -105,6 +146,17 @@ function normalizePhone(raw: string): string {
 export async function handleIncomingMessage(
   opts: IncomingMessageOptions
 ): Promise<HandleResult> {
+  // Per-customer serialization: see withCustomerLock above. We use
+  // businessId + normalized phone as the lock key so calls from the
+  // same (business, customer) chain in order, while different
+  // customers still run in parallel.
+  const customerKey = `${opts.businessId}:${normalizePhone(opts.from)}`;
+  return withCustomerLock(customerKey, () => handleIncomingMessageInner(opts));
+}
+
+async function handleIncomingMessageInner(
+  opts: IncomingMessageOptions
+): Promise<HandleResult> {
   const { businessId, from, text } = opts;
   const customerPhone = normalizePhone(from);
 
@@ -154,12 +206,60 @@ export async function handleIncomingMessage(
     const conversationStatePrompt = conversationId
       ? await getConversationStateForPrompt(conversationId)
       : '';
+    // Also pull the customer's next upcoming appointment so the LLM
+    // can disambiguate reschedule/cancel/clarification against ground
+    // truth, not conversation_state guesswork. Falls back to a
+    // placeholder when customerId wasn't created (persistence failed).
+    const upcomingAppointmentPrompt = customerId
+      ? await getUpcomingAppointmentForPrompt(businessId, customerId)
+      : '## Upcoming appointment\n(unavailable — customer not yet persisted)';
 
     const llmResult = await generateReply({
       customerMessage: text,
       salonContext,
       conversationStatePrompt,
+      upcomingAppointmentPrompt,
     });
+
+    // Step 5b: escalation — record an escalation_events row when the
+    // LLM flags intent='complaint' or when its confidence is so low
+    // (and the intent isn't a booking action) that the salon owner
+    // should probably step in. Dashboard reads from this table but
+    // nothing was writing to it until now.
+    if (conversationId) {
+      try {
+        if (llmResult.intent === 'complaint') {
+          await recordEscalation(
+            conversationId,
+            'customer_complaint',
+            llmResult.reply
+          );
+          requestLog.info(
+            { conversationId },
+            'escalation recorded: customer_complaint'
+          );
+        } else if (
+          llmResult.confidence < 30 &&
+          !['book', 'cancel', 'reschedule'].includes(llmResult.intent)
+        ) {
+          await recordEscalation(
+            conversationId,
+            'low_confidence',
+            llmResult.reply
+          );
+          requestLog.info(
+            { conversationId, confidence: llmResult.confidence },
+            'escalation recorded: low_confidence'
+          );
+        }
+      } catch (e) {
+        // Non-fatal — escalation logging shouldn't break the reply.
+        requestLog.warn(
+          { err: (e as Error).message },
+          'escalation recording failed (non-fatal)'
+        );
+      }
+    }
 
     // Step 6: booking decision (only if we have a conversationId for state writes)
     if (conversationId && customerId) {
