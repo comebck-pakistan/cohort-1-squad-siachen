@@ -5,7 +5,7 @@ import type { SalonContext } from './db';
 // — just the value semantically holds a MiniMax key now). Functional rename
 // can come later.
 const API_KEY = process.env.ANTHROPIC_API_KEY || '';
-const MODEL = 'MiniMax-M3';
+const MODEL = 'MiniMax-M2.7-highspeed';
 
 // MiniMax API — OpenAI-compatible endpoint
 const API_URL = 'https://api.minimax.io/v1/chat/completions';
@@ -383,11 +383,18 @@ export async function generateReply({
       API_URL,
       {
         model: MODEL,
-        // Bumped 800 → 1500 (mid-JSON truncation observed) → 2500
-        // (overlong reasoning left no room for output) → 4000 because
-        // MiniMax-M3 burns ~2K reasoning_tokens on complex turns even
-        // when the user-facing reply fits in <500 tokens.
-        max_tokens: 4000,
+        // M2.7-highspeed is the previous-gen reasoning-bounded variant
+        // — M3 (current top-tier) was burning 3.8K reasoning_tokens
+        // on complex multi-turn inputs, hitting max_tokens mid-think and
+        // leaking "Sorry, I am having trouble responding" to customers.
+        // M2.7-highspeed's reasoning budget is smaller, so we drop back
+        // to a faster model AND keep a generous output budget (6000)
+        // as a safety net for any future case where reasoning still
+        // runs long on ambiguous slot-extraction turns.
+        // History: 800 → 1500 (mid-JSON truncation) → 2500 (overlong
+        // reasoning left no room for output) → 4000 (M3 burns ~2K even
+        // on simple inputs) → 6000 with M2.7-highspeed.
+        max_tokens: 6000,
         // Disable deep chain-of-thought for this structured-extraction
         // task. The bot's job is: (1) classify intent, (2) pull out
         // service/date/time slots, (3) write a 1-3 sentence reply.
@@ -539,7 +546,7 @@ function parseStructuredReply(raw: string): GenerateReplyResult {
     // making it impossible to diagnose whether the model returned a
     // partial object, a thinking-block-only response, or valid JSON
     // with a trailing comma. THIS is what we need to see the actual
-    // failure mode of MiniMax-M3 on real customer messages.
+    // failure mode of MiniMax-M2.7-highspeed on real customer messages.
     console.warn(
       '[llm] malformed/truncated JSON from model — using FALLBACK reply. ' +
       'full raw response (%d chars):\n%s',

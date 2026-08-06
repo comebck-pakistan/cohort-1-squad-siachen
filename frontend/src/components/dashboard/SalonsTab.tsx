@@ -23,10 +23,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { PaymentStatusBadge as _unused, StatusBadge, TierBadge } from "./StatusBadge";
-import { AlertTriangle, Plus, QrCode, Search, Trash2 } from "lucide-react";
+import { AlertTriangle, Plus, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { AddSalonModal } from "@/components/modals/AddSalonModal";
-import { QRModal } from "@/components/modals/QRModal";
 import { DeleteSalonModal } from "@/components/modals/DeleteSalonModal";
 import type { BillingStatus, Business, Tier } from "@/types";
 
@@ -38,7 +37,6 @@ export function SalonsTab() {
   const [city, setCity] = useState<string>("all");
   const [billing, setBilling] = useState<BillingStatus | "all">("all");
   const [openAdd, setOpenAdd] = useState(false);
-  const [qrFor, setQrFor] = useState<Business | null>(null);
   const [deleteFor, setDeleteFor] = useState<Business | null>(null);
 
   const qc = useQueryClient();
@@ -218,9 +216,6 @@ export function SalonsTab() {
                               )}
                             </div>
                           )}
-                          <Button variant="outline" size="sm" onClick={() => setQrFor(b)}>
-                            <QrCode className="size-4" /> Pair
-                          </Button>
                           <Button variant="destructive" size="sm" onClick={() => setDeleteFor(b)}>
                             <Trash2 className="size-4" /> Delete
                           </Button>
@@ -236,7 +231,6 @@ export function SalonsTab() {
       </Card>
 
       <AddSalonModal open={openAdd} onOpenChange={setOpenAdd} />
-      <QRModal open={!!qrFor} business={qrFor} onOpenChange={(v) => !v && setQrFor(null)} />
       <DeleteSalonModal
         open={!!deleteFor}
         business={deleteFor}

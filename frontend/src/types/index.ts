@@ -67,6 +67,8 @@ export interface OnboardingStatus {
   businessId: string;
   status: "qr_ready" | "ready" | "initializing" | "not_found";
   hasQR: boolean;
+  /** Raw QR string from whatsapp-web bridge. Encode with qrcode.react. */
+  qr: string | null;
 }
 
 export interface CreateSalonInput {

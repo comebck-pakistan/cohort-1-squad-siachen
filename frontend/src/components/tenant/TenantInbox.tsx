@@ -9,13 +9,13 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { api, qk } from "@/lib/api";
+import type { NextAppointment } from "@/lib/api";
 import { useTenantBusinessId } from "@/lib/useTenantBusinessId";
 import {
   Search,
   Send,
   UserCog,
   Bot,
-  CalendarCheck,
   CreditCard,
   CheckCircle2,
   Phone,
@@ -81,6 +81,7 @@ interface NormalizedConvo {
   bucket: "active" | "human" | "done";
   lastCustomer: string | null;
   lastAgent: string | null;
+  nextAppointment: NextAppointment | null;
 }
 
 export function TenantInbox() {
@@ -110,6 +111,7 @@ export function TenantInbox() {
       bucket: bucketFromStatus(c.status),
       lastCustomer: c.state?.last_customer_msg ?? null,
       lastAgent: c.state?.last_agent_msg ?? null,
+      nextAppointment: c.next_appointment ?? null,
     };
   });
 
@@ -317,9 +319,22 @@ export function TenantInbox() {
         </div>
         <div className="p-5 space-y-2">
           <h3 className="text-sm font-semibold mb-2">Quick Actions</h3>
-          <Button variant="outline" className="w-full justify-start">
-            <CalendarCheck className="size-4" /> Confirm Appointment in System
-          </Button>
+          {active?.nextAppointment && (
+            <div className="text-xs text-muted-foreground rounded-md bg-muted/40 px-3 py-2 mb-2">
+              <div className="font-medium text-foreground mb-1">
+                Upcoming booking
+              </div>
+              {active.nextAppointment.service_name ?? "appointment"}
+              {active.nextAppointment.staff_name && (
+                <> · {active.nextAppointment.staff_name}</>
+              )}{" "}
+              ·{" "}
+              {new Date(active.nextAppointment.start_time).toLocaleString(
+                "en-PK",
+                { timeZone: "Asia/Karachi", weekday: "short", hour: "2-digit", minute: "2-digit" },
+              )}
+            </div>
+          )}
           <Button variant="outline" className="w-full justify-start">
             <CreditCard className="size-4" /> Send Payment Link
           </Button>

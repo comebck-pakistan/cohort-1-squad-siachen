@@ -278,7 +278,10 @@ router.patch(
 
 // ---------------------------------------------------------------------------
 // 6. POST /api/business/:businessId/services
-//    Body: { name, duration_minutes, staff_required?, price? }
+//    Body: { name, duration_minutes, staff_required?, price?, category? }
+//    category was added in 13_salon_portal_fields.sql — owner dashboard
+//    surfaces a category pick ("Hair" / "Skin" / "Nails") for new
+//    services so we persist it here.
 // ---------------------------------------------------------------------------
 router.post(
   '/business/:businessId/services',
@@ -290,11 +293,13 @@ router.post(
       duration_minutes,
       staff_required = 1,
       price,
+      category,
     } = (req.body || {}) as {
       name?: string;
       duration_minutes?: number;
       staff_required?: number;
       price?: number;
+      category?: string;
     };
     if (!name || !duration_minutes) {
       return res.status(400).json({ error: 'Missing name or duration_minutes' });
@@ -314,9 +319,10 @@ router.post(
         duration_minutes,
         staff_required,
         price: price ?? null,
+        category: category || null,
         is_active: true,
       })
-      .select('id, name, duration_minutes, staff_required, price, is_active')
+      .select('id, name, duration_minutes, staff_required, price, category, is_active')
       .single();
 
     if (error || !data) {
@@ -326,9 +332,124 @@ router.post(
   }
 );
 
+// PATCH /api/business/:businessId/services/:serviceId
+// Owner-edit flow for the Services Catalog tab. Body: partial —
+// { name?, duration_minutes?, price?, category?, is_active? }.
+// Validates duration_minutes if provided (positive integer, ≥5).
+router.patch(
+  '/business/:businessId/services/:serviceId',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId, serviceId } = req.params;
+    const { name, duration_minutes, price, category, is_active } = (req.body || {}) as {
+      name?: string;
+      duration_minutes?: number;
+      price?: number;
+      category?: string | null;
+      is_active?: boolean;
+    };
+
+    const supabase = getSupabase();
+    const { data: existing } = await supabase
+      .from('services')
+      .select('business_id')
+      .eq('id', serviceId)
+      .maybeSingle();
+    if (!existing) return res.status(404).json({ error: 'Service not found' });
+    if (existing.business_id !== businessId) {
+      return res.status(403).json({ error: 'Not your service' });
+    }
+
+    const update: Record<string, unknown> = {};
+    if (name !== undefined) {
+      if (!name.trim()) return res.status(400).json({ error: 'name cannot be empty' });
+      update.name = name.trim();
+    }
+    if (duration_minutes !== undefined) {
+      if (!Number.isInteger(duration_minutes) || duration_minutes < 5) {
+        return res.status(400).json({ error: 'duration_minutes must be a positive integer (min 5)' });
+      }
+      update.duration_minutes = duration_minutes;
+    }
+    if (price !== undefined) update.price = price;
+    if (category !== undefined) update.category = category;
+    if (is_active !== undefined) update.is_active = is_active;
+
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    const { data, error } = await supabase
+      .from('services')
+      .update(update)
+      .eq('id', serviceId)
+      .select('id, name, duration_minutes, staff_required, price, category, is_active, created_at')
+      .single();
+    if (error || !data) return res.status(500).json({ error: error?.message || 'Update failed' });
+    return res.json({ service: data });
+  }
+);
+
+// PATCH /api/business/:businessId/staff/:staffId
+// Owner-edit flow for the Staff Allocation tab. Body: partial —
+// { name?, role?, working_days?, phone?, is_active? }.
+// Editing a staff's *skills* is a separate flow (PATCH /staff/:id/skills)
+// — that's the many-to-many table this route deliberately does not touch.
+router.patch(
+  '/business/:businessId/staff/:staffId',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId, staffId } = req.params;
+    const { name, role, working_days, phone, is_active } = (req.body || {}) as {
+      name?: string;
+      role?: string | null;
+      working_days?: string | null;
+      phone?: string | null;
+      is_active?: boolean;
+    };
+
+    const supabase = getSupabase();
+    const { data: existing } = await supabase
+      .from('staff')
+      .select('business_id')
+      .eq('id', staffId)
+      .maybeSingle();
+    if (!existing) return res.status(404).json({ error: 'Staff not found' });
+    if (existing.business_id !== businessId) {
+      return res.status(403).json({ error: 'Not your staff' });
+    }
+
+    const update: Record<string, unknown> = {};
+    if (name !== undefined) {
+      if (!name.trim()) return res.status(400).json({ error: 'name cannot be empty' });
+      update.name = name.trim();
+    }
+    if (role !== undefined) update.role = role;
+    if (working_days !== undefined) update.working_days = working_days;
+    if (phone !== undefined) update.phone = phone;
+    if (is_active !== undefined) update.is_active = is_active;
+
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    const { data, error } = await supabase
+      .from('staff')
+      .update(update)
+      .eq('id', staffId)
+      .select('id, name, phone, role, working_days, is_active, created_at')
+      .single();
+    if (error || !data) return res.status(500).json({ error: error?.message || 'Update failed' });
+    return res.json({ staff: data });
+  }
+);
+
 // ---------------------------------------------------------------------------
 // 7. GET /api/business/:businessId/conversations
-//    List recent conversations with last message preview.
+//    List recent conversations with last message preview + (when present)
+//    the customer's NEXT upcoming appointment. The next_appointment join
+//    unlocks the Inbox "Confirm Appointment in System" quick-action —
+//    owner can confirm without a separate lookup.
 // ---------------------------------------------------------------------------
 router.get(
   '/business/:businessId/conversations',
@@ -352,7 +473,54 @@ router.get(
       .limit(limit);
 
     if (error) return res.status(500).json({ error: error.message });
-    return res.json({ conversations: data || [] });
+
+    // Pull "next upcoming appointment per customer" in a single query so
+    // we don't N+1 the conversations list. Only future, non-cancelled
+    // appointments count.
+    const customerIds = (data || [])
+      .map((c) => (Array.isArray(c.customer) ? c.customer[0]?.id : c.customer?.id))
+      .filter((x): x is string => Boolean(x));
+    let nextByCustomer = new Map<
+      string,
+      { id: string; start_time: string; end_time: string; status: string; service_name: string | null; staff_name: string | null }
+    >();
+    if (customerIds.length > 0) {
+      const { data: appts } = await supabase
+        .from('appointments')
+        .select(`
+          id, customer_id, start_time, end_time, status,
+          service:services(name),
+          staff:staff(name)
+        `)
+        .eq('business_id', businessId)
+        .in('customer_id', customerIds)
+        .in('status', ['pending', 'confirmed'])
+        .gt('start_time', new Date().toISOString())
+        .order('start_time', { ascending: true });
+      for (const a of appts || []) {
+        if (nextByCustomer.has(a.customer_id)) continue; // first wins = soonest
+        nextByCustomer.set(a.customer_id, {
+          id: a.id,
+          start_time: a.start_time,
+          end_time: a.end_time,
+          status: a.status,
+          service_name: (Array.isArray(a.service) ? a.service[0]?.name : a.service?.name) ?? null,
+          staff_name: (Array.isArray(a.staff) ? a.staff[0]?.name : a.staff?.name) ?? null,
+        });
+      }
+    }
+
+    const decorated = (data || []).map((c) => {
+      // Supabase joins can resolve as object OR as a one-element array.
+      const custRecord = Array.isArray(c.customer) ? c.customer[0] : c.customer;
+      const custId = custRecord?.id;
+      return {
+        ...c,
+        next_appointment: custId ? nextByCustomer.get(custId) || null : null,
+      };
+    });
+
+    return res.json({ conversations: decorated });
   }
 );
 

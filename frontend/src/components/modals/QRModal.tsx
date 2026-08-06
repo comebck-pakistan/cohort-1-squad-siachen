@@ -8,7 +8,8 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
-import { CheckCircle2, Loader2, QrCode, AlertTriangle } from "lucide-react";
+import { CheckCircle2, Loader2, AlertTriangle } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
 import { api, qk } from "@/lib/api";
 import type { Business, OnboardingStatus } from "@/types";
 
@@ -47,7 +48,7 @@ export function QRModal({ open, business, onOpenChange }: Props) {
         </DialogHeader>
 
         <div className="flex flex-col items-center gap-4 py-2">
-          <div className="size-56 rounded-lg border bg-muted grid place-items-center relative overflow-hidden">
+          <div className="size-56 rounded-lg border bg-white grid place-items-center relative overflow-hidden p-3">
             {status.isLoading ? (
               <Skeleton className="size-full animate-pulse" />
             ) : s === "ready" ? (
@@ -60,10 +61,21 @@ export function QRModal({ open, business, onOpenChange }: Props) {
                 <AlertTriangle className="size-10" />
                 <div className="text-xs">No session found</div>
               </div>
+            ) : s === "qr_ready" && status.data?.qr ? (
+              // Render the real, scannable QR. `qr` is the raw string the
+              // bridge returns; qrcode.react encodes it as an SVG.
+              // size=200 keeps it within the 224px panel with padding.
+              <QRCodeSVG
+                value={status.data.qr}
+                size={200}
+                level="M"
+                includeMargin={false}
+              />
             ) : s === "qr_ready" ? (
-              <div className="flex flex-col items-center gap-2 text-foreground">
-                <QrCode className="size-32" strokeWidth={1.25} />
-                <div className="text-xs text-muted-foreground">Auto-refreshes every 2.5s</div>
+              // Status says QR is ready but no string yet — transient.
+              <div className="flex flex-col items-center gap-2 text-muted-foreground">
+                <Loader2 className="size-8 animate-spin" />
+                <div className="text-xs">Awaiting QR payload…</div>
               </div>
             ) : (
               <div className="flex flex-col items-center gap-2 text-muted-foreground">
@@ -74,6 +86,12 @@ export function QRModal({ open, business, onOpenChange }: Props) {
           </div>
 
           <Badge className={`${meta.className} border-transparent font-medium`}>{meta.label}</Badge>
+
+          <div className="text-xs text-muted-foreground text-center">
+            {s === "qr_ready"
+              ? "Open WhatsApp on your phone → Settings → Linked Devices → Link a Device"
+              : "Auto-refreshes every 2.5s"}
+          </div>
 
           {business && (
             <div className="text-xs text-muted-foreground font-mono">

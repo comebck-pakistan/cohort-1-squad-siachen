@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
@@ -33,7 +33,8 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Plus, Trash2, CalendarX } from "lucide-react";
+import { Plus, Trash2, CalendarX, Pencil, Loader2 } from "lucide-react";
+import { toast } from "sonner";
 import { api, qk } from "@/lib/api";
 import { useTenantBusinessId } from "@/lib/useTenantBusinessId";
 
@@ -243,6 +244,7 @@ function TimeSelect({
 function ServicesTab() {
   const tenant = useTenantBusinessId();
   const businessId = tenant.data?.businessId ?? "";
+  const qc = useQueryClient();
   const servicesQ = useQuery({
     queryKey: businessId ? qk.services(businessId) : ["services", "none"],
     queryFn: () => api.services(businessId),
@@ -277,21 +279,124 @@ function ServicesTab() {
     description: "",
   });
 
+  // Persist to backend on Add. Optimistic insert happens immediately, and
+  // the useEffect above re-syncs when the query invalidates, replacing the
+  // tmp row with the canonical server row.
+  //
+  // IMPORTANT: payload is passed as mutate() variables, NOT read from the
+  // `form` closure inside mutationFn. React Query invokes mutationFn after
+  // the calling event handler unwinds, by which point `setForm({...empty})`
+  // has re-rendered and the closure would see empty strings — producing
+  // `{name:"", duration_minutes:0, ...}` and a 400 from the backend.
+  const createMut = useMutation({
+    mutationFn: (payload: {
+      name: string;
+      duration_minutes: number;
+      price: number;
+      category: ServiceRow["category"];
+    }) => api.createService(businessId, payload),
+    onSuccess: (data, payload) => {
+      qc.invalidateQueries({ queryKey: qk.services(businessId) });
+      toast.success(`Service "${payload.name}" saved`);
+    },
+    onError: (e: Error) =>
+      toast.error(`Could not save service: ${e.message}`),
+  });
+
   function add() {
     if (!form.name || !form.price || !form.duration) return;
+    // Capture form values BEFORE any state reset so the mutation uses the
+    // user's actual input, not the empty-form closure from the next render.
+    const payload = {
+      name: form.name,
+      duration_minutes: Number(form.duration),
+      price: Number(form.price),
+      category: form.category,
+    };
+    // Optimistic local insert so the row appears immediately.
     setRows((s) => [
       ...s,
       {
-        id: crypto.randomUUID(),
-        name: form.name,
-        price: Number(form.price),
-        duration: Number(form.duration),
-        category: form.category,
+        id: `tmp-${crypto.randomUUID()}`,
+        name: payload.name,
+        price: payload.price,
+        duration: payload.duration_minutes,
+        category: payload.category,
         active: true,
       },
     ]);
     setForm({ name: "", price: "", duration: "", category: "Hair", description: "" });
     setOpen(false);
+    createMut.mutate(payload);
+  }
+
+  // ---- Edit service ------------------------------------------------------
+  // Owner edits name/price/duration/category from the row's pencil button.
+  // Active toggle has its own one-field mutation so we don't re-render the
+  // whole edit dialog when the user just flips the on/off switch.
+  const [editing, setEditing] = useState<ServiceRow | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editForm, setEditForm] = useState({
+    name: "",
+    price: "",
+    duration: "",
+    category: "Hair" as ServiceRow["category"],
+  });
+
+  const updateMut = useMutation({
+    mutationFn: (args: {
+      id: string;
+      body: Partial<{
+        name: string;
+        duration_minutes: number;
+        price: number;
+        category: string;
+      }>;
+    }) => api.updateService(businessId, args.id, args.body),
+    onSuccess: (data, args) => {
+      qc.invalidateQueries({ queryKey: qk.services(businessId) });
+      const updated = data.service.name;
+      toast.success(
+        args.body.name ? `Service "${updated}" updated` : "Service updated",
+      );
+      setEditOpen(false);
+      setEditing(null);
+    },
+    onError: (e: Error) =>
+      toast.error(`Could not update service: ${e.message}`),
+  });
+
+  const toggleMut = useMutation({
+    mutationFn: (args: { id: string; is_active: boolean }) =>
+      api.updateService(businessId, args.id, { is_active: args.is_active }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.services(businessId) });
+    },
+    onError: (e: Error) =>
+      toast.error(`Could not toggle: ${e.message}`),
+  });
+
+  function startEdit(row: ServiceRow) {
+    setEditing(row);
+    setEditForm({
+      name: row.name,
+      price: String(row.price),
+      duration: String(row.duration),
+      category: row.category,
+    });
+    setEditOpen(true);
+  }
+
+  function saveEdit() {
+    if (!editing) return;
+    if (!editForm.name.trim() || !editForm.price || !editForm.duration) return;
+    const body = {
+      name: editForm.name.trim(),
+      duration_minutes: Number(editForm.duration),
+      price: Number(editForm.price),
+      category: editForm.category,
+    };
+    updateMut.mutate({ id: editing.id, body });
   }
 
   return (
@@ -377,6 +482,99 @@ function ServicesTab() {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {/* Edit dialog — same fields as Add but pre-populated from the row */}
+        <Dialog
+          open={editOpen}
+          onOpenChange={(v) => {
+            setEditOpen(v);
+            if (!v) setEditing(null);
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Edit service</DialogTitle>
+              <DialogDescription>
+                Update the name, price, duration, or category. Changes apply
+                immediately to the AI's catalog.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-3">
+              <div className="grid gap-1.5">
+                <Label>Service name</Label>
+                <Input
+                  value={editForm.name}
+                  onChange={(e) =>
+                    setEditForm({ ...editForm, name: e.target.value })
+                  }
+                />
+              </div>
+              <div className="grid grid-cols-3 gap-3">
+                <div className="grid gap-1.5">
+                  <Label>Price (PKR)</Label>
+                  <Input
+                    type="number"
+                    value={editForm.price}
+                    onChange={(e) =>
+                      setEditForm({ ...editForm, price: e.target.value })
+                    }
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label>Duration (mins)</Label>
+                  <Input
+                    type="number"
+                    value={editForm.duration}
+                    onChange={(e) =>
+                      setEditForm({ ...editForm, duration: e.target.value })
+                    }
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label>Category</Label>
+                  <Select
+                    value={editForm.category}
+                    onValueChange={(v) =>
+                      setEditForm({
+                        ...editForm,
+                        category: v as ServiceRow["category"],
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Hair">Hair</SelectItem>
+                      <SelectItem value="Skin">Skin</SelectItem>
+                      <SelectItem value="Nails">Nails</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setEditOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                onClick={saveEdit}
+                disabled={
+                  updateMut.isPending ||
+                  !editForm.name.trim() ||
+                  !editForm.price ||
+                  !editForm.duration
+                }
+                className="bg-primary hover:bg-primary/90"
+              >
+                {updateMut.isPending && (
+                  <Loader2 className="size-4 animate-spin" />
+                )}
+                Save changes
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </CardHeader>
       <CardContent className="p-0">
         <Table>
@@ -386,7 +584,7 @@ function ServicesTab() {
               <TableHead>Category</TableHead>
               <TableHead>Duration</TableHead>
               <TableHead>Price</TableHead>
-              <TableHead className="text-right">Active</TableHead>
+              <TableHead className="text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -399,12 +597,28 @@ function ServicesTab() {
                 <TableCell>{r.duration} mins</TableCell>
                 <TableCell>PKR {r.price.toLocaleString()}</TableCell>
                 <TableCell className="text-right">
-                  <Switch
-                    checked={r.active}
-                    onCheckedChange={(v) =>
-                      setRows((s) => s.map((x) => (x.id === r.id ? { ...x, active: v } : x)))
-                    }
-                  />
+                  <div className="inline-flex items-center justify-end gap-2">
+                    <Switch
+                      checked={r.active}
+                      disabled={toggleMut.isPending}
+                      onCheckedChange={(v) => {
+                        // Optimistic local flip + backend persist.
+                        setRows((s) =>
+                          s.map((x) => (x.id === r.id ? { ...x, active: v } : x)),
+                        );
+                        toggleMut.mutate({ id: r.id, is_active: v });
+                      }}
+                    />
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => startEdit(r)}
+                      className="size-8 p-0"
+                      aria-label={`Edit ${r.name}`}
+                    >
+                      <Pencil className="size-4" />
+                    </Button>
+                  </div>
                 </TableCell>
               </TableRow>
             ))}
@@ -426,9 +640,16 @@ type StaffRow = {
 function StaffTab() {
   const tenant = useTenantBusinessId();
   const businessId = tenant.data?.businessId ?? "";
+  const qc = useQueryClient();
   const staffQ = useQuery({
     queryKey: businessId ? qk.staff(businessId) : ["staff", "none"],
     queryFn: () => api.staff(businessId),
+    enabled: !!businessId,
+    staleTime: 60_000,
+  });
+  const servicesQ = useQuery({
+    queryKey: businessId ? qk.services(businessId) : ["staff-form", "services", businessId, "none"],
+    queryFn: () => api.services(businessId),
     enabled: !!businessId,
     staleTime: 60_000,
   });
@@ -452,23 +673,116 @@ function StaffTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [staffQ.data?.staff?.length]);
 
+  // Persist staff add. Specialty text is fuzzy-matched against the salon
+  // service list (substring, case-insensitive) so "Color" → "Hair Color"
+  // becomes a `skill_service_ids`. Anything that doesn't match is dropped
+  // (owner can wire skills later via the staff-skills endpoint).
+  //
+  // IMPORTANT: payload is passed as mutate() variables, NOT read from the
+  // `form` closure inside mutationFn. Same closure-capture bug as ServicesTab
+  // — by the time react-query invokes mutationFn, `setForm({...empty})` has
+  // already re-rendered and the closure would see `name: ""` → 400.
+  const createMut = useMutation({
+    mutationFn: (payload: { name: string; skill_service_ids: string[] }) =>
+      api.createStaff(businessId, payload),
+    onSuccess: (data, payload) => {
+      qc.invalidateQueries({ queryKey: qk.staff(businessId) });
+      toast.success(`Staff "${payload.name}" saved`);
+    },
+    onError: (e: Error) =>
+      toast.error(`Could not save staff: ${e.message}`),
+  });
+
   function add() {
     if (!form.name || !form.role) return;
+    const specTexts = form.specs
+      .split(",")
+      .map((sp) => sp.trim())
+      .filter(Boolean);
+    const services = servicesQ.data?.services ?? [];
+    const matchedIds = specTexts
+      .map((sp) => {
+        const lower = sp.toLowerCase();
+        return services.find((s) => s.name.toLowerCase().includes(lower))?.id;
+      })
+      .filter((x): x is string => Boolean(x));
+    // Capture values BEFORE resetting form so the mutation uses real input.
+    const payload = {
+      name: form.name,
+      skill_service_ids: matchedIds,
+    };
+    const role = form.role;
+    const days = form.days || "—";
+    // Optimistic local insert.
     setRows((s) => [
       ...s,
       {
-        id: crypto.randomUUID(),
-        name: form.name,
-        role: form.role,
-        specs: form.specs
-          .split(",")
-          .map((sp) => sp.trim())
-          .filter(Boolean),
-        days: form.days || "—",
+        id: `tmp-${crypto.randomUUID()}`,
+        name: payload.name,
+        role,
+        specs: specTexts,
+        days,
       },
     ]);
     setForm({ name: "", role: "", specs: "", days: "" });
     setOpen(false);
+    createMut.mutate(payload);
+  }
+
+  // ---- Edit staff ---------------------------------------------------------
+  // Owner edits name/role/working_days. Skills are managed via the separate
+  // /staff/:id/skills endpoint (multi-select UI not in scope here).
+  const [editing, setEditing] = useState<StaffRow | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editForm, setEditForm] = useState({
+    name: "",
+    role: "",
+    days: "",
+  });
+
+  const updateMut = useMutation({
+    mutationFn: (args: {
+      id: string;
+      body: Partial<{
+        name: string;
+        role: string | null;
+        working_days: string | null;
+        phone: string | null;
+      }>;
+    }) => api.updateStaff(businessId, args.id, args.body),
+    onSuccess: (data, args) => {
+      qc.invalidateQueries({ queryKey: qk.staff(businessId) });
+      toast.success(
+        args.body.name ? `Staff "${data.staff.name}" updated` : "Staff updated",
+      );
+      setEditOpen(false);
+      setEditing(null);
+    },
+    onError: (e: Error) =>
+      toast.error(`Could not update staff: ${e.message}`),
+  });
+
+  function startEdit(row: StaffRow) {
+    setEditing(row);
+    setEditForm({
+      name: row.name,
+      role: row.role,
+      days: row.days,
+    });
+    setEditOpen(true);
+  }
+
+  function saveEdit() {
+    if (!editing) return;
+    if (!editForm.name.trim() || !editForm.role.trim()) return;
+    updateMut.mutate({
+      id: editing.id,
+      body: {
+        name: editForm.name.trim(),
+        role: editForm.role.trim(),
+        working_days: editForm.days.trim() || null,
+      },
+    });
   }
 
   return (
@@ -541,6 +855,75 @@ function StaffTab() {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {/* Edit dialog — name/role/working_days. Skills are managed
+            elsewhere (separate endpoint). */}
+        <Dialog
+          open={editOpen}
+          onOpenChange={(v) => {
+            setEditOpen(v);
+            if (!v) setEditing(null);
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Edit staff member</DialogTitle>
+              <DialogDescription>
+                Update the name, role, or working days. Changes apply
+                immediately to the AI's booking router.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-3">
+              <div className="grid gap-1.5">
+                <Label>Full name</Label>
+                <Input
+                  value={editForm.name}
+                  onChange={(e) =>
+                    setEditForm({ ...editForm, name: e.target.value })
+                  }
+                />
+              </div>
+              <div className="grid gap-1.5">
+                <Label>Profession / Role</Label>
+                <Input
+                  value={editForm.role}
+                  onChange={(e) =>
+                    setEditForm({ ...editForm, role: e.target.value })
+                  }
+                />
+              </div>
+              <div className="grid gap-1.5">
+                <Label>Working days</Label>
+                <Input
+                  value={editForm.days}
+                  onChange={(e) =>
+                    setEditForm({ ...editForm, days: e.target.value })
+                  }
+                  placeholder="e.g. Mon–Sat"
+                />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setEditOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                onClick={saveEdit}
+                disabled={
+                  updateMut.isPending ||
+                  !editForm.name.trim() ||
+                  !editForm.role.trim()
+                }
+                className="bg-primary hover:bg-primary/90"
+              >
+                {updateMut.isPending && (
+                  <Loader2 className="size-4 animate-spin" />
+                )}
+                Save changes
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </CardHeader>
       <CardContent className="p-0">
         <Table>
@@ -550,12 +933,13 @@ function StaffTab() {
               <TableHead>Role</TableHead>
               <TableHead>Specializations</TableHead>
               <TableHead>Working Days</TableHead>
+              <TableHead className="text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {rows.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={4} className="text-center py-10 text-muted-foreground">
+                <TableCell colSpan={5} className="text-center py-10 text-muted-foreground">
                   No staff added yet.
                 </TableCell>
               </TableRow>
@@ -584,6 +968,17 @@ function StaffTab() {
                     </div>
                   </TableCell>
                   <TableCell>{s.days}</TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => startEdit(s)}
+                      className="size-8 p-0"
+                      aria-label={`Edit ${s.name}`}
+                    >
+                      <Pencil className="size-4" />
+                    </Button>
+                  </TableCell>
                 </TableRow>
               ))
             )}

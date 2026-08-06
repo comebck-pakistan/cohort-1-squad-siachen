@@ -36,6 +36,26 @@ export interface ServiceRow {
   created_at: string;
 }
 
+export interface AppointmentRow {
+  id: string;
+  start_time: string;
+  end_time: string;
+  status: "pending" | "confirmed" | "completed" | "cancelled" | "no_show";
+  source: string;
+  customer: { id: string; phone: string; name: string | null } | null;
+  service: { id: string; name: string; price: number | null; duration_minutes: number } | null;
+  staff: { id: string; name: string } | null;
+}
+
+export interface NextAppointment {
+  id: string;
+  start_time: string;
+  end_time: string;
+  status: AppointmentRow["status"];
+  service_name: string | null;
+  staff_name: string | null;
+}
+
 export interface EscalationRow {
   id: string;
   conversation_id: string;
@@ -106,7 +126,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 async function withMock<T>(path: string, mock: () => T, init?: RequestInit): Promise<T> {
   try {
     return await request<T>(path, init);
-  } catch {
+  } catch (err) {
+    // Loud-fail so broken wirings don't pass silently under mock fixtures.
+    // Always log the swallowed error so the developer sees it.
+    // Also re-throw when VITE_DISABLE_MOCK_FALLBACK=true so genuine
+    // end-to-end tests fail loudly instead of seeing fixture data.
+    // Default behavior (Lovable preview, no backend) is unchanged —
+    // error is logged AND mock is returned.
+    // eslint-disable-next-line no-console
+    console.error(`[api] withMock fallback for ${path} — backend call failed:`, err);
+    if (import.meta.env?.VITE_DISABLE_MOCK_FALLBACK === 'true') {
+      throw err;
+    }
     return mock();
   }
 }
@@ -372,6 +403,7 @@ export const api = {
       businessId,
       status: "qr_ready",
       hasQR: true,
+      qr: null,
     })),
   connectionInfo: (businessId: string) =>
     withMock(`/api/business/${businessId}/connection-info`, () => ({
@@ -409,6 +441,7 @@ export const api = {
           last_agent_msg: string | null;
           outcome: string | null;
         } | null;
+        next_appointment: NextAppointment | null;
       }>,
     })),
 
@@ -416,6 +449,161 @@ export const api = {
     withMock(`/api/business/${businessId}/services`, () => ({
       services: [] as ServiceRow[],
     })),
+
+  // ---- Wave 1 dashboard wiring -------------------------------------------
+
+  /** Today's bookings (Asia/Karachi day). Auto-refreshes every 60s. */
+  businessToday: (businessId: string) =>
+    withMock(`/api/business/${businessId}/today`, () => ({
+      appointments: [] as AppointmentRow[],
+    })),
+
+  /** Bookings for a specific date. Pass date as YYYY-MM-DD. */
+  businessBookings: (businessId: string, date: string) =>
+    withMock(
+      `/api/business/${businessId}/bookings?date=${encodeURIComponent(date)}`,
+      () => ({
+        date,
+        appointments: [] as AppointmentRow[],
+      }),
+    ),
+
+  /** Create a new service. Backend accepts category since 13_salon_portal_fields. */
+  createService: (
+    businessId: string,
+    body: {
+      name: string;
+      duration_minutes: number;
+      price?: number;
+      category?: string;
+    },
+  ) =>
+    withMock<{ service: ServiceRow }>(
+      `/api/business/${businessId}/services`,
+      () => ({
+        service: {
+          id: crypto.randomUUID(),
+          name: body.name,
+          price: body.price ?? 0,
+          duration_minutes: body.duration_minutes,
+          category: body.category ?? null,
+          created_at: new Date().toISOString(),
+        },
+      }),
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  /** Edit a service. Backend accepts a partial body. */
+  updateService: (
+    businessId: string,
+    serviceId: string,
+    body: Partial<{
+      name: string;
+      duration_minutes: number;
+      price: number;
+      category: string | null;
+      is_active: boolean;
+    }>,
+  ) =>
+    withMock<{ service: ServiceRow }>(
+      `/api/business/${businessId}/services/${serviceId}`,
+      () => ({
+        service: {
+          id: serviceId,
+          name: body.name ?? "",
+          price: body.price ?? 0,
+          duration_minutes: body.duration_minutes ?? 0,
+          category: body.category ?? null,
+          created_at: new Date().toISOString(),
+        },
+      }),
+      { method: "PATCH", body: JSON.stringify(body) },
+    ),
+
+  /** Create new staff, optionally with skills assigned at creation. */
+  createStaff: (
+    businessId: string,
+    body: { name: string; phone?: string; skill_service_ids?: string[] },
+  ) =>
+    withMock<{ staff: StaffRow & { id: string; name: string; phone: string | null; is_active: boolean; created_at: string } }>(
+      `/api/business/${businessId}/staff`,
+      () => ({
+        staff: {
+          id: crypto.randomUUID(),
+          name: body.name,
+          phone: body.phone ?? null,
+          role: null,
+          working_days: null,
+          is_active: true,
+          created_at: new Date().toISOString(),
+          service_ids: body.skill_service_ids ?? [],
+        },
+      }),
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  /** Edit a staff record. Partial body — name/role/working_days/phone/is_active. */
+  updateStaff: (
+    businessId: string,
+    staffId: string,
+    body: Partial<{
+      name: string;
+      role: string | null;
+      working_days: string | null;
+      phone: string | null;
+      is_active: boolean;
+    }>,
+  ) =>
+    withMock<{ staff: StaffRow }>(
+      `/api/business/${businessId}/staff/${staffId}`,
+      () => ({
+        staff: {
+          id: staffId,
+          name: body.name ?? "",
+          phone: body.phone ?? null,
+          role: body.role ?? null,
+          working_days: body.working_days ?? null,
+          is_active: body.is_active ?? true,
+          created_at: new Date().toISOString(),
+          service_ids: [],
+        },
+      }),
+      { method: "PATCH", body: JSON.stringify(body) },
+    ),
+
+  /** Replace the staff's skill set with the given service IDs. */
+  setStaffSkills: (staffId: string, serviceIds: string[]) =>
+    withMock<{ staff_id: string; service_ids: string[] }>(
+      `/api/staff/${staffId}/skills`,
+      () => ({ staff_id: staffId, service_ids: serviceIds }),
+      { method: "PATCH", body: JSON.stringify({ service_ids: serviceIds }) },
+    ),
+
+  /** Patch an appointment — confirm/cancel/reschedule. */
+  patchAppointment: (
+    appointmentId: string,
+    body: {
+      status?: "pending" | "confirmed" | "completed" | "cancelled";
+      start_time?: string;
+      end_time?: string;
+    },
+  ) =>
+    withMock<{ appointment: AppointmentRow }>(
+      `/api/appointments/${appointmentId}`,
+      () => ({
+        appointment: {
+          id: appointmentId,
+          start_time: new Date().toISOString(),
+          end_time: new Date().toISOString(),
+          status: body.status ?? "pending",
+          source: "owner_manual",
+          customer: null,
+          service: null,
+          staff: null,
+        },
+      }),
+      { method: "PATCH", body: JSON.stringify(body) },
+    ),
 
   dashboardStats: (businessId: string) =>
     withMock(`/api/business/${businessId}/dashboard-stats`, () => ({
@@ -475,4 +663,7 @@ export const qk = {
   dashboardStats: (id: string) => ["dashboard-stats", id] as const,
   escalations: (id: string) => ["escalations", id] as const,
   aiRules: (id: string) => ["ai-rules", id] as const,
+  businessToday: (id: string) => ["bookings", "today", id] as const,
+  businessBookings: (id: string, date: string) =>
+    ["bookings", "date", id, date] as const,
 };

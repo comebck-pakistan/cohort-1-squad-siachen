@@ -42,6 +42,7 @@ type NavItem = {
 
 const nav: NavItem[] = [
   { to: "/salon-portal", label: "Overview", icon: LayoutDashboard, exact: true },
+  { to: "/salon-portal/bookings", label: "Bookings", icon: CalendarDays },
   { to: "/salon-portal/inbox", label: "Conversations", icon: MessagesSquare },
   { to: "/salon-portal/escalations", label: "Edge Cases", icon: AlertTriangle, badge: 3 },
   { to: "/salon-portal/business", label: "Services & Staff", icon: Scissors },
@@ -268,7 +269,6 @@ export function TenantShell() {
         {/* Coming-soon quick links (visual parity with reference) */}
         <div className="px-3 pb-3">
           <div className="rounded-lg border border-dashed p-3 text-[11px] text-muted-foreground space-y-1.5">
-            <div className="flex items-center gap-2 opacity-80"><CalendarDays className="size-3.5" /> Bookings · coming soon</div>
             <div className="flex items-center gap-2 opacity-80"><Users className="size-3.5" /> Staff availability · coming soon</div>
             <div className="flex items-center gap-2 opacity-80"><Megaphone className="size-3.5" /> Promotions · coming soon</div>
           </div>
