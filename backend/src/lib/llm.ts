@@ -88,6 +88,7 @@ You have access to (per-turn, fresh from the database — never guess):
 - {{SERVICES_LIST}} — service names, prices (PKR), durations
 - {{SALON_HOURS}} — opening hours per day-of-week
 - {{CURRENT_DATETIME_PKT}} — actual current date+time in Pakistan Standard Time (Asia/Karachi, UTC+5). NEVER assume, guess, or calculate this yourself. Always read it from this turn's context.
+- {{UPCOMING_APPOINTMENT}} — the customer's next non-cancelled appointment at this salon, if any (service, date, time in PKT, stylist). May say "(none — customer has no upcoming bookings)" or "(unavailable — DB lookup failed)". Use this to disambiguate reschedule/cancel/clarification against ground truth — never guess when this is available.
 - {{CONVERSATION_STATE}} — locked-in slots from earlier in this conversation (selected_service, requested_date, requested_time, customer_name, customer_phone)
 - {{AI_RULES}} — owner-edited rules for this specific salon (may be empty)
 
@@ -150,6 +151,23 @@ Bugs like telling a customer a future time "has already passed" are unacceptable
 6. After the customer confirms, set reply_text to indicate the system will request the slot (use "I will request", "let me submit this", "salon will confirm shortly" — NEVER "booked", "confirmed", "set", "scheduled"). Only the system can mark a booking as final.
 7. If any required detail is missing, ask for ONLY that detail — one question at a time.
 
+## 4b. Customer already has an upcoming appointment — soft guidance (not a hard rule)
+
+When the {{UPCOMING_APPOINTMENT}} block shows the customer has an ACTIVE booking, AND the customer is now asking to book a NEW service (intent=book), AND the new requested time overlaps with the existing booking — the customer cannot physically be in two places at once. Before creating the second booking:
+
+1. Mention the existing one by name and time, in Roman Urdu.
+2. Ask ONE clarifying question offering two paths:
+   - Cancel the existing one and book the new one at the same time, OR
+   - Pick a different time for the new booking.
+3. Suggested phrasing (translate naturally; don't copy verbatim):
+   "Aap ke paas already [SERVICE] ki booking hai [DAY, TIME] pe. Kya aap chahti hain ke main usko cancel ker ke ye nayi service same time pe book ker dun, ya alag time pe book ker dun?"
+
+If the new time does NOT overlap with the existing booking (different day or different time), proceed normally — there's no conflict.
+
+This guidance is intentionally scoped to booking-only. Reschedule and cancel already handle the existing-appointment flow via dedicated intent routing — do not apply this rule to those.
+
+The database has a hard backstop that will reject any same-customer time-overlap booking attempt — but a polite clarifying question gives a much better experience than a sudden rejection.
+
 ## 5. FAQs
 
 Answer directly from the services list and hours — prices, durations, service types, opening hours, location. If something isn't in the provided data, say you'll check and get back — never guess a price or make up a service.
@@ -176,9 +194,35 @@ If the owner rules section (above) is non-empty, treat every line as a binding o
 - NEVER ask for information the customer already gave earlier in this conversation.
 - NEVER invent the current date or time — read it from the header.
 - NEVER use "ji" suffix when addressing the customer.
-
----
-
+- Reschedule vs cancel vs book — three DIFFERENT intents:
+   - "book" = customer wants a brand NEW appointment.
+   - "reschedule" = customer has an existing appointment and wants to MOVE it (time AND/OR service).
+   - "cancel" = customer wants to cancel their existing appointment.
+   Deciding which one: ALWAYS read the {{UPCOMING_APPOINTMENT}} block first.
+     - If it shows an active booking AND the customer's message is about
+       moving/changing/cancelling that booking → it's reschedule or cancel.
+     - If it shows "(none — customer has no upcoming bookings)" AND the
+       customer is clearly asking to move/cancel something → it does NOT
+       exist to move, so reply acknowledging there is nothing to act on
+       and offer to book fresh instead. Use confidence < 50 in this case.
+     - If it shows "(unavailable — DB lookup failed)" → you can't be sure,
+       fall back to clarifying question (see confirmation rule below).
+   Triggers for "reschedule" (return intent=reschedule, confidence ≥ 75):
+     "move my booking", "change the time", "shift to", "can I reschedule",
+     "different time", "earlier", "later", "instead of X, can we do Y",
+     "kal ki jagah parson", "Saturday ki jagah Sunday", "actually can we
+     do X instead" (when X is a different service from the active
+     booking), any "can you move…".
+   Triggers for "cancel" (return intent=cancel, confidence ≥ 75):
+     "cancel", "cancel my booking", "na karna", "rehne do", "no need",
+     "I don't want it now", "please cancel", "I'm not coming", "not
+     coming", "can't make it", "will miss", "make nahi aa sakta",
+     "make nahi aa sakti", "miss karunga", "miss karungi", "I'll be
+     stuck", "out of town that day".
+   DO NOT bucket reschedule or cancel as intent=book. A new booking is NOT
+   what the customer is asking for — they want their EXISTING appointment
+   moved or removed. Setting intent=book will create a duplicate booking
+   and leave the old one untouched, which is the worst possible outcome.
 ## OUTPUT FORMAT — every reply MUST be a JSON object with EXACTLY these fields:
 
 {
@@ -188,7 +232,7 @@ If the owner rules section (above) is non-empty, treat every line as a binding o
   "preferred_time": string or null — 24-hour HH:MM (e.g. "3pm" → "15:00", "sham 4 pm" → "16:00", "subah 10 baje" → "10:00"). Same rules: customer's current message wins for any slot it touches.
   "customer_name": string or null — if the customer shared their name in this conversation (check conversation state first — don't ask again for a name already known).
   "customer_phone": string or null — if the customer shared their phone.
-  "reply_text": the actual message to send to the customer (1-3 sentences, warm and conversational, ≤1 emoji, no corporate phrasing, NO "ji" suffix).
+  "reply_text": the actual message to send to the customer (1-3 sentences, warm and conversational, ≤1 emoji, no corporate phrasing, NO "ji" suffix). May be a confirmation question ("shall I go ahead?") or a clarifying question ("did you want to move your Tuesday 4pm or book a new slot?") when confidence < 90 on reschedule/cancel, per the destructive-action rule.
   "confidence": number 0-100 — how confident you are in the structured fields. Use 90+ only when intent + service + date + time are all clear.
 }`;
 
@@ -206,7 +250,8 @@ If the owner rules section (above) is non-empty, treat every line as a binding o
  */
 function buildSystemPrompt(
   ctx: SalonContext,
-  conversationStatePrompt?: string
+  conversationStatePrompt?: string,
+  upcomingAppointmentPrompt?: string
 ): string {
   // ------------------------------------------------------------------
   // 1. Fill the placeholders in BASE_PROMPT with real per-turn data.
@@ -237,6 +282,10 @@ function buildSystemPrompt(
     ? ctx.ai_rules.trim()
     : '(no owner rules set)';
 
+  const apptBlock = (upcomingAppointmentPrompt && upcomingAppointmentPrompt.trim())
+    ? upcomingAppointmentPrompt
+    : '## Upcoming appointment\n(none — no upcoming appointment lookup was performed this turn)';
+
   const cityLine = ctx.city ? `\nLocation: ${ctx.city}` : '';
   const staffLine = `Staff: ${ctx.staff_count} active${ctx.is_configured ? '' : ' (but no services yet)'}`;
 
@@ -260,7 +309,8 @@ function buildSystemPrompt(
     .replace('{{SALON_HOURS}}', hoursBlock)
     .replace('{{CURRENT_DATETIME_PKT}}', `${ctx.current_datetime_pkt} (today is ${ctx.today_pkt})`)
     .replace('{{CONVERSATION_STATE}}', stateBlock)
-    .replace('{{AI_RULES}}', rulesBlock);
+    .replace('{{AI_RULES}}', rulesBlock)
+    .replace('{{UPCOMING_APPOINTMENT}}', apptBlock);
 
   // ------------------------------------------------------------------
   // 2. Append salon header (location/timezone) + extras that don't
@@ -289,30 +339,70 @@ interface GenerateReplyOptions {
    * Replaces the old message-history list as source of truth.
    */
   conversationStatePrompt?: string;
+  /**
+   * Formatted markdown block describing the customer's next upcoming
+   * non-cancelled appointment at this salon (service, date, time in PKT,
+   * stylist) — or a placeholder when none. Surfaces ground truth to the
+   * LLM so it can disambiguate reschedule/cancel/clarification requests
+   * instead of guessing from conversation state.
+   */
+  upcomingAppointmentPrompt?: string;
 }
 
 export async function generateReply({
   customerMessage,
   salonContext,
   conversationStatePrompt,
+  upcomingAppointmentPrompt,
 }: GenerateReplyOptions): Promise<GenerateReplyResult> {
   try {
-    const systemPrompt = buildSystemPrompt(salonContext, conversationStatePrompt);
+    const systemPrompt = buildSystemPrompt(
+      salonContext,
+      conversationStatePrompt,
+      upcomingAppointmentPrompt
+    );
 
     const messages: Array<{ role: 'system' | 'user'; content: string }> = [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: customerMessage },
     ];
 
+    // [DIAGNOSTIC] Pre-call prompt size. Lets us correlate parse
+    // failures with prompt-bloat events (e.g. long services lists
+    // pushing us past the model's safe context window). Cheap line.
+    console.log(
+      '[llm] call: prompt_chars=%d customer_msg_chars=%d has_conversation_state=%s has_upcoming_appt=%s',
+      systemPrompt.length,
+      customerMessage.length,
+      Boolean(conversationStatePrompt && conversationStatePrompt.trim()),
+      Boolean(upcomingAppointmentPrompt && /service:/.test(upcomingAppointmentPrompt))
+    );
+
+    const t0 = Date.now();
     const response = await axios.post(
       API_URL,
       {
         model: MODEL,
-        // Bumped from 800 → 1500 because we've observed MiniMax
-        // truncate mid-JSON on long system prompts (full services +
-        // hours + state), leaving "preferred_time": "15:" — which our
-        // parser then leaks to the customer as the bot reply.
-        max_tokens: 1500,
+        // Bumped 800 → 1500 (mid-JSON truncation observed) → 2500
+        // (overlong reasoning left no room for output) → 4000 because
+        // MiniMax-M3 burns ~2K reasoning_tokens on complex turns even
+        // when the user-facing reply fits in <500 tokens.
+        max_tokens: 4000,
+        // Disable deep chain-of-thought for this structured-extraction
+        // task. The bot's job is: (1) classify intent, (2) pull out
+        // service/date/time slots, (3) write a 1-3 sentence reply.
+        // That is NOT a problem that benefits from the model "thinking"
+        // at length — and the full-reasoning setting caused ~3.8K
+        // hidden reasoning tokens per call, which (a) took 20-70s on
+        // WhatsApp-scale latency, and (b) hit max_tokens mid-thinking
+        // which leaked "Sorry, I am having trouble responding" to
+        // customers via the FALLBACK path.
+        //
+        // Verified by direct API probe: with reasoning_effort=low the
+        // model still emits a short ①think block but finishes well
+        // under max_tokens with finish_reason='stop' and a clean
+        // final reply (e.g. "Hi there! 👋 How can I help you today?").
+        reasoning_effort: 'low',
         messages,
       },
       {
@@ -325,6 +415,9 @@ export async function generateReply({
 
     const rawContent: string =
       response.data?.choices?.[0]?.message?.content || '';
+    const finishReason: string | undefined =
+      response.data?.choices?.[0]?.finish_reason;
+    const usage = response.data?.usage;
 
     // Strip any <think> reasoning blocks (some models emit them inline).
     const cleaned = rawContent
@@ -332,6 +425,22 @@ export async function generateReply({
       .trim();
 
     const parsed = parseStructuredReply(cleaned);
+
+
+    // [DIAGNOSTIC] Post-call telemetry. Helps disambiguate parse failures:
+    //  - finish_reason='length' -> model truncated output (raise max_tokens)
+    //  - finish_reason='stop' + low chars -> model returned early
+    //  - long latency -> network/API slow (consider retry/backoff)
+    // Logged on every call so future parse failures have context.
+    console.log(
+      '[llm] response: latency_ms=%d response_chars=%d finish_reason=%s usage=%j intent=%s confidence=%d',
+      Date.now() - t0,
+      rawContent.length,
+      finishReason ?? 'unknown',
+      usage ?? null,
+      parsed.intent,
+      parsed.confidence
+    );
 
     // ----------------------------------------------------------------
     // Diagnostic: when the LLM returns a book-intent reply with

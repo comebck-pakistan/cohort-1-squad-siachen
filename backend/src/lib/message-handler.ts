@@ -2,6 +2,7 @@ import {
   getOrCreateCustomer,
   getOrCreateConversation,
   getConversationStateForPrompt,
+  getUpcomingAppointmentForPrompt,
   getSalonContext,
   updateConversationState,
   touchConversation,
@@ -205,11 +206,19 @@ async function handleIncomingMessageInner(
     const conversationStatePrompt = conversationId
       ? await getConversationStateForPrompt(conversationId)
       : '';
+    // Also pull the customer's next upcoming appointment so the LLM
+    // can disambiguate reschedule/cancel/clarification against ground
+    // truth, not conversation_state guesswork. Falls back to a
+    // placeholder when customerId wasn't created (persistence failed).
+    const upcomingAppointmentPrompt = customerId
+      ? await getUpcomingAppointmentForPrompt(businessId, customerId)
+      : '## Upcoming appointment\n(unavailable — customer not yet persisted)';
 
     const llmResult = await generateReply({
       customerMessage: text,
       salonContext,
       conversationStatePrompt,
+      upcomingAppointmentPrompt,
     });
 
     // Step 5b: escalation — record an escalation_events row when the

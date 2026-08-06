@@ -144,6 +144,33 @@ function formatFailure(
           : '';
       return `Sorry — ${outcome.detail}.${alt}`;
     }
+    case 'customer_already_booked': {
+      // Format the existing booking's start time in PKT for the message,
+      // since the user lives in Pakistan.
+      const conflict = outcome.conflict;
+      if (!conflict) {
+        // Should never happen, but defensively degrade.
+        return outcome.detail;
+      }
+      const when = new Date(conflict.startTime);
+      const whenStr = when.toLocaleString('en-PK', {
+        timeZone: 'Asia/Karachi',
+        weekday: 'short', month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit', hour12: true,
+      });
+      const existingSvc = conflict.serviceName;
+      // Roman Urdu phrasing: name the existing service + time, then offer
+      // two choices — cancel-and-rebook OR pick a different time.
+      // Mirrors the user's preferred template:
+      //   "ye kab book kron ya apki is time slot per pehlay wali cancel ker dun?"
+      // Plus a clarifying question for the customer to choose.
+      return (
+        `Aap ke paas pehlay se **${existingSvc}** ki booking hai ` +
+        `**${whenStr}** pe. ` +
+        `Kya aap chahti hain ke usko cancel ker ke ye nayi booking ker dun, ` +
+        `ya kisi aur time slot me book ker dun?`
+      );
+    }
     case 'invalid_date_format':
     case 'invalid_time_format':
       return `Sorry — ${outcome.detail}. Could you rephrase the date or time?`;
@@ -317,11 +344,19 @@ async function handleReschedule(
   }
 
   try {
+    // Pass the LLM-supplied service ONLY if it differs from the locked
+    // one already in conversation state. Same string = no-op swap, so we
+    // skip the extra DB lookup. The LLM's service-lock guard already
+    // protects against partial-phrase swaps in processBookingDecision,
+    // so by the time we get here, llmResult.service_interest is either
+    // null or the canonical resolved name.
+    const requestedService = llmResult.service_interest?.trim() || null;
     const outcome = await rescheduleAppointment({
       businessId: ctx.businessId,
       customerId: ctx.customerId,
       preferredDate: llmResult.preferred_date,
       preferredTime: llmResult.preferred_time,
+      newServiceName: requestedService,
     });
 
     if (outcome.ok) {
@@ -333,10 +368,15 @@ async function handleReschedule(
       const timeStr = newStart.toLocaleTimeString('en-PK', {
         timeZone: 'Asia/Karachi', hour: '2-digit', minute: '2-digit', hour12: true,
       });
+      // Service line: when a swap happened, show "old → new" so the
+      // customer can sanity-check the change visually.
+      const serviceLine = outcome.serviceChanged
+        ? `• Service: ${outcome.serviceName} (changed from your previous booking)`
+        : `• Service: ${outcome.serviceName}`;
       return {
         finalReply:
           `✅ Rescheduled!\n\n` +
-          `• Service: ${outcome.serviceName}\n` +
+          `${serviceLine}\n` +
           `• New time: ${dateStr} at ${timeStr}\n` +
           `• Stylist: ${outcome.staffName}\n\n` +
           `See you then!`,
@@ -348,6 +388,14 @@ async function handleReschedule(
     if (outcome.reason === 'no_upcoming_appointment') {
       return {
         finalReply: `You don't have any upcoming appointments to reschedule. Want to book a new one instead?`,
+        appointment: null,
+      };
+    }
+    if (outcome.reason === 'service_not_offered') {
+      // Re-use the detail string db.ts built with "did you mean…?" so
+      // the customer can correct themselves without another roundtrip.
+      return {
+        finalReply: outcome.detail,
         appointment: null,
       };
     }

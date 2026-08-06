@@ -369,14 +369,18 @@ export class WhatsAppWebClient extends EventEmitter {
     // the customer today".
     // -------------------------------------------------------------------
     const MAX_DELIVERY_ATTEMPTS = 3;
-    // Per-attempt timeout. The backend's first LLM call legitimately
-    // takes 10-20s on a MiniMax-M3 cold call (the customer's first
-    // message in a conversation pays full cost for prompt assembly +
-    // LLM round-trip). 30s gives one good retry window before we
-    // consider the message dead-lettered. 3 attempts × 30s + 1s/3s
-    // backoff = ~94s worst case before dead-letter, which is fine
-    // because the customer is waiting either way.
-    const PER_ATTEMPT_TIMEOUT_MS = 30_000;
+    // Per-attempt timeout. The backend's LLM call legitimately
+    // takes 20-70s on MiniMax-M3 (the model burns ~3.8K reasoning
+    // tokens before producing JSON — see the diagnostic dump in
+    // /lib/llm.ts). The LLM may also take 10-20s on a cold first
+    // call (full prompt assembly + round-trip). 90s gives one good
+    // retry window before we consider the message dead-lettered.
+    // 3 attempts × 90s + 1s/3s backoff = ~274s worst case, which
+    // is well above what we want but it surfaces real stalls — the
+    // open question is whether we should switch to a faster model
+    // rather than ride out this latency (see Step 1 reasoning
+    // investigation).
+    const PER_ATTEMPT_TIMEOUT_MS = 90_000;
     const BACKOFF_MS = [1_000, 3_000];
 
     let reply: string | null = null;

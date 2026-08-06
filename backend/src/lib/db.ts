@@ -338,6 +338,139 @@ export async function getConversationStateForPrompt(
 }
 
 // ---------------------------------------------------------------------------
+// Upcoming appointment — fed to the LLM so it can disambiguate
+// reschedule/cancel requests against fresh context instead of guessing.
+//
+// Returns a short markdown block the bot prepends to the conversation
+// state. Critical for the "the customer says 'sham 5 pm?' — do they want
+// to MOVE their Tuesday 4pm booking or book a SECOND one?" decision.
+//
+// Returns a placeholder when:
+//   - the customer has no upcoming appointments
+//   - the customer has multiple (we show the soonest only, with a count)
+//   - DB lookup fails (so the LLM gets "unknown", not a stale snapshot)
+//
+// IMPORTANT: this surfaces ground truth to the LLM, not conversation_state.
+// The two stay in sync because both are written by the same code paths,
+// but if they ever diverge this is the authoritative answer.
+// ---------------------------------------------------------------------------
+
+export interface UpcomingAppointmentSummary {
+  appointmentId: string;
+  serviceName: string;
+  /** ISO 8601 in UTC */
+  startTime: string;
+  /** ISO 8601 in UTC */
+  endTime: string;
+  staffName: string | null;
+  /** How many ACTIVE upcoming appointments this customer has at this business. */
+  totalUpcoming: number;
+}
+
+export async function getUpcomingAppointmentForPrompt(
+  businessId: string,
+  customerId: string
+): Promise<string> {
+  try {
+    // Find all upcoming non-cancelled appointments. Previously we only
+    // rendered the soonest + a "you have N" hint, but that left the
+    // LLM unable to answer "which 2 bookings do I have?" — the bot
+    // would reply with a generic clarification prompt and the customer
+    // got frustrated. Render each appointment's full details so the
+    // LLM has ground truth to disambiguate against. Cap at MAX to
+    // avoid prompt-bloat on test-run pollution (we've seen customers
+    // with 5+ ghost rows during testing).
+    const MAX_APPOINTMENTS = 3;
+    const { data, error } = await getSupabase()
+      .from('appointments')
+      .select('id, service_id, staff_id, start_time, end_time')
+      .eq('business_id', businessId)
+      .eq('customer_id', customerId)
+      .in('status', ['pending', 'confirmed'])
+      .gt('start_time', new Date().toISOString())
+      .order('start_time', { ascending: true })
+      .limit(MAX_APPOINTMENTS);
+
+    if (error) {
+      console.warn(
+        `[db.ts] getUpcomingAppointmentForPrompt failed: ${error.message}`
+      );
+      return '## Upcoming appointments\n(unavailable — DB lookup failed)';
+    }
+    if (!data || data.length === 0) {
+      return '## Upcoming appointments\n(none — customer has no upcoming bookings at this salon)';
+    }
+
+    // Resolve ALL service + staff names in parallel so the rendering
+    // loop below can reference them by id.
+    const serviceIds = Array.from(new Set(data.map((a) => a.service_id).filter(Boolean)));
+    const staffIds = Array.from(new Set(data.map((a) => a.staff_id).filter(Boolean)));
+
+    const [servicesRes, staffRes] = await Promise.all([
+      serviceIds.length > 0
+        ? getSupabase().from('services').select('id, name').in('id', serviceIds)
+        : { data: [], error: null },
+      staffIds.length > 0
+        ? getSupabase().from('staff').select('id, name').in('id', staffIds)
+        : { data: [], error: null },
+    ]);
+
+    const serviceNameById = new Map<string, string>();
+    if (servicesRes.data) {
+      for (const s of servicesRes.data) serviceNameById.set(s.id, s.name);
+    }
+    const staffNameById = new Map<string, string>();
+    if (staffRes.data) {
+      for (const s of staffRes.data) staffNameById.set(s.id, s.name);
+    }
+
+    const lines: string[] = [
+      data.length === 1
+        ? '## Upcoming appointment (authoritative — use this to disambiguate reschedule/cancel/clarification)'
+        : `## Upcoming appointments (${data.length} total — authoritative, use these to disambiguate reschedule/cancel/clarification)`,
+    ];
+
+    data.forEach((appt, i) => {
+      const start = new Date(appt.start_time);
+      const dateStr = start.toLocaleDateString('en-PK', {
+        timeZone: 'Asia/Karachi',
+        weekday: 'short',
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      });
+      const timeStr = start.toLocaleTimeString('en-PK', {
+        timeZone: 'Asia/Karachi',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+      });
+
+      const serviceName = appt.service_id ? serviceNameById.get(appt.service_id) ?? 'service' : 'service';
+      const staffName = appt.staff_id ? staffNameById.get(appt.staff_id) ?? null : null;
+
+      // Multi-appointment label (e.g. "Appointment 1", "Appointment 2")
+      // so the LLM can reference a specific one back to the customer
+      // ("you have Booking 2 at 6pm — should I cancel that one?").
+      const header = data.length > 1 ? `\n### Appointment ${i + 1}` : '';
+      lines.push(header);
+      lines.push(`- service: ${serviceName}`);
+      lines.push(`- date: ${dateStr}`);
+      lines.push(`- time: ${timeStr} PKT`);
+      if (staffName) lines.push(`- stylist: ${staffName}`);
+    });
+
+    return lines.join('\n');
+  } catch (e) {
+    console.warn(
+      `[db.ts] getUpcomingAppointmentForPrompt threw: ${(e as Error).message}`
+    );
+    return '## Upcoming appointments\n(unavailable — unexpected error)';
+  }
+}
+
+
+// ---------------------------------------------------------------------------
 // Salon context — feeds the LLM with real per-business data
 // ---------------------------------------------------------------------------
 
@@ -520,11 +653,25 @@ export interface AppointmentFailure {
     | 'slot_taken'
     | 'past_time'
     | 'invalid_date_format'
-    | 'invalid_time_format';
+    | 'invalid_time_format'
+    | 'customer_already_booked';
   /** Human-readable detail (e.g. "Salon is closed on Sundays"). */
   detail: string;
   /** Alternative slots the bot can suggest, ISO timestamps. */
   suggestions: string[];
+  /**
+   * When reason='customer_already_booked', this carries the conflicting
+   * appointment's details so the booking layer can phrase a clarifying
+   * question that names the existing service + time + stylist.
+   */
+  conflict?: {
+    appointmentId: string;
+    serviceName: string;
+    /** ISO timestamp — already-formatted display comes from the booking layer. */
+    startTime: string;
+    endTime: string;
+    staffName: string | null;
+  };
 }
 
 export type AppointmentOutcome = AppointmentSuccess | AppointmentFailure;
@@ -609,6 +756,108 @@ function extractTimeFromRpcRow(row: unknown): string | null {
 
   return null;
 }
+// ---------------------------------------------------------------------------
+// Same-customer-time dedup — prevents the bug where a customer gets TWO
+// active appointments that overlap in time (regardless of stylist).
+//
+// Even when two stylists are involved, one customer cannot be in two
+// places at once. The Postgres EXCLUSION constraint
+// `no_overlapping_staff_appointments` only catches same-stylist
+// double-bookings — it does NOT catch cross-stylist ones. Without this
+// guard we book the customer for a second conflicting appointment the
+// moment a different stylist is available.
+//
+// Symptom it fixes (live-transcripted 2026-08-05):
+//   - 22:36 — customer books Nail Art Full Set @ Fri 4pm (Sana Malik)
+//   - 22:37 — customer asks about Bridal Nail Package charges
+//   - 22:37 — customer says "han g" (yes) to bot's "Book karni hai?"
+//   - 22:37 — bot books Bridal Nail Package @ Fri 4pm (Hira Khan)
+//     → TWO ACTIVE APPOINTMENTS, SAME TIME, ONE CUSTOMER. Boom.
+//
+// The check uses app.salesforce-style "any overlap" semantics:
+//   existing.start < new.end   AND   existing.end > new.start
+// ---------------------------------------------------------------------------
+
+export interface CustomerBookingConflict {
+  appointmentId: string;
+  serviceName: string;
+  startTime: string; // ISO
+  endTime: string;   // ISO
+  staffName: string | null;
+}
+
+/**
+ * Return the customer's ACTIVE appointment (if any) that overlaps the
+ * given time window [startTime, endTime). Pass excludeAppointmentId when
+ * called from the reschedule path so it doesn't flag the appointment
+ * being moved against itself.
+ */
+export async function findCustomerBookingOverlap(
+  businessId: string,
+  customerId: string,
+  startTime: Date,
+  endTime: Date,
+  excludeAppointmentId?: string
+): Promise<CustomerBookingConflict | null> {
+  try {
+    // SQL: start_time < newEnd AND end_time > newStart
+    // (with optional id <> excludeAppointmentId for the reschedule path)
+    let q = getSupabase()
+      .from('appointments')
+      .select('id, service_id, staff_id, start_time, end_time')
+      .eq('business_id', businessId)
+      .eq('customer_id', customerId)
+      .in('status', ['pending', 'confirmed'])
+      .lt('start_time', endTime.toISOString())
+      .gt('end_time', startTime.toISOString())
+      .order('start_time', { ascending: true })
+      .limit(1);
+    if (excludeAppointmentId) {
+      q = q.neq('id', excludeAppointmentId);
+    }
+    const { data, error } = await q.maybeSingle();
+    if (error || !data) return null;
+
+    // Resolve service name
+    let serviceName = 'a service';
+    if (data.service_id) {
+      const { data: svc } = await getSupabase()
+        .from('services')
+        .select('name')
+        .eq('id', data.service_id)
+        .maybeSingle();
+      if (svc?.name) serviceName = svc.name;
+    }
+
+    // Resolve staff name
+    let staffName: string | null = null;
+    if (data.staff_id) {
+      const { data: staff } = await getSupabase()
+        .from('staff')
+        .select('name')
+        .eq('id', data.staff_id)
+        .maybeSingle();
+      if (staff?.name) staffName = staff.name;
+    }
+
+    return {
+      appointmentId: data.id,
+      serviceName,
+      startTime: data.start_time,
+      endTime: data.end_time,
+      staffName,
+    };
+  } catch (e) {
+    // Fail-open: if the dedup check itself errors, log and let the
+    // booking proceed. The EXCLUSION constraint is the final safety net.
+    console.warn(
+      '[db.ts] findCustomerBookingOverlap threw (fail-open):',
+      (e as Error).message
+    );
+    return null;
+  }
+}
+
 async function findServiceByName(
   businessId: string,
   searchName: string
@@ -849,6 +1098,38 @@ export async function createAppointmentIfValid(
   // 6. Compute scheduled_end
   const endTime = addMinutes(startTime, service.durationMinutes);
 
+  // 6.5. Same-customer-time dedup guard. The Postgres EXCLUSION
+  //      constraint only catches same-stylist overlaps — two stylists
+  //      with the same time slot can each take a separate appointment
+  //      for the same customer, which physically violates the
+  //      "one customer, one chair" rule. Returns customer_already_booked
+  //      so the booking layer can phrase a Roman Urdu clarifying
+  //      question instead of letting the second booking slide through.
+  const conflict = await findCustomerBookingOverlap(
+    req.businessId,
+    req.customerId,
+    startTime,
+    endTime
+  );
+  if (conflict) {
+    console.log(
+      '[db.ts] customer_already_booked: existing appt=%s service=%s at %s — blocking new booking for service=%s',
+      conflict.appointmentId,
+      conflict.serviceName,
+      conflict.startTime,
+      req.serviceName
+    );
+    return {
+      ok: false,
+      reason: 'customer_already_booked',
+      detail:
+        `You already have ${conflict.serviceName} ` +
+        `at ${conflict.startTime} — same customer cannot be in two services at once.`,
+      suggestions: [],
+      conflict,
+    };
+  }
+
   // 7. Race-safe slot check via PL/pgSQL get_available_slots().
   // Used ONLY to generate alternative-time suggestions when the INSERT
   // below trips the EXCLUSION constraint. We do NOT gate on this — the
@@ -977,6 +1258,16 @@ export interface RescheduleRequest {
   preferredDate: string;
   /** "HH:MM" 24h — new preferred time */
   preferredTime: string;
+  /**
+   * Optional — if provided AND different from the existing service, the
+   * appointment will be moved to (date, time, new service) atomically.
+   * If null/omitted, the existing service is preserved (legacy behavior).
+   * Added because customers regularly say "actually can we change to the
+   * gel manicure as well as 6pm?" — silently keeping the old service
+   * here is a trust-breaking failure mode (customer shows up to wrong
+   * service with no warning).
+   */
+  newServiceName?: string | null;
 }
 
 export type RescheduleOutcome =
@@ -985,8 +1276,12 @@ export type RescheduleOutcome =
       appointmentId: string;
       oldStart: string;
       newStart: string;
+      /** Service name AFTER the change. May differ from the original
+       *  if newServiceName was supplied. */
       serviceName: string;
       staffName: string;
+      /** True only when a service swap happened during this reschedule. */
+      serviceChanged: boolean;
     }
   | {
       ok: false;
@@ -996,9 +1291,15 @@ export type RescheduleOutcome =
         | 'past_time'
         | 'outside_hours'
         | 'slot_taken'
+        | 'service_not_offered'
         | 'db_error';
       detail: string;
       suggestions?: string[];
+      /** When the failure was caused by an overlap with one of this
+       *  customer's OTHER active appointments, this carries its details
+       *  (the same shape as AppointmentFailure.conflict). The booking
+       *  layer uses it to ask whether to cancel the old one first. */
+      conflict?: CustomerBookingConflict;
     };
 
 /**
@@ -1077,28 +1378,117 @@ export async function rescheduleAppointment(
     };
   }
 
-  // 4. Compute new end_time (preserve duration)
-  const { data: svc } = await getSupabase()
+  // 4. Compute new end_time using the existing service's duration.
+  //    We may switch to a new service below if newServiceName was supplied.
+  const { data: existingSvc } = await getSupabase()
     .from('services')
     .select('duration_minutes, name')
     .eq('id', appt.service_id)
     .maybeSingle();
-  if (!svc) {
+  if (!existingSvc) {
     return {
       ok: false,
       reason: 'db_error',
       detail: 'Could not find the service for this appointment',
     };
   }
+
+  // 4b. Optional service swap. If the caller passed newServiceName AND
+  //     it resolves to a different service in this salon's catalogue,
+  //     use the new service's duration for end_time and update
+  //     service_id. If it doesn't match any service in the catalogue,
+  //     reject with service_not_offered — silently keeping the old
+  //     service is exactly the failure mode we're trying to avoid
+  //     (customer shows up to wrong appointment).
+  let svc = existingSvc;
+  let newServiceId: string | null = appt.service_id;
+  let serviceChanged = false;
+  if (req.newServiceName && req.newServiceName.trim().length > 0) {
+    const desired = req.newServiceName.trim();
+    const { data: matchedSvc, error: matchErr } = await getSupabase()
+      .from('services')
+      .select('id, name, duration_minutes')
+      .eq('business_id', req.businessId)
+      .ilike('name', desired)
+      .maybeSingle();
+    if (matchErr) {
+      return {
+        ok: false,
+        reason: 'db_error',
+        detail: 'Could not check the new service name',
+      };
+    }
+    if (!matchedSvc) {
+      // Try a fuzzy partial match as a fallback — same approach the
+      // booking path uses in findServiceByName(). The owner-facing
+      // message names a few alternatives so the customer can correct
+      // themselves.
+      const { data: fuzzy } = await getSupabase()
+        .from('services')
+        .select('name')
+        .eq('business_id', req.businessId)
+        .ilike('name', `%${desired}%`)
+        .limit(3);
+      const alts = fuzzy?.map((r) => r.name).filter(Boolean) ?? [];
+      return {
+        ok: false,
+        reason: 'service_not_offered',
+        detail:
+          alts.length > 0
+            ? `We don't offer "${desired}". Did you mean: ${alts.join(', ')}?`
+            : `We don't offer "${desired}" at this salon.`,
+      };
+    }
+    if (matchedSvc.id !== appt.service_id) {
+      svc = matchedSvc;
+      newServiceId = matchedSvc.id;
+      serviceChanged = true;
+    }
+  }
+
   const newEnd = new Date(newStart.getTime() + svc.duration_minutes * 60_000);
 
-  // 5. UPDATE — EXCLUSION constraint catches double-booking
+  // 4c. Same-customer-time dedup — make sure the NEW slot doesn't
+  //     collide with one of the customer's OTHER active appointments
+  //     (the one being moved is excluded by id). The EXCLUSION constraint
+  //     only catches same-stylist conflicts, not cross-stylist — and
+  //     even then, it's the wrong layer to surface a clear "you already
+  //     have X booked" message to the customer.
+  const conflict = await findCustomerBookingOverlap(
+    req.businessId,
+    req.customerId,
+    newStart,
+    newEnd,
+    appt.id  // exclude the appointment being moved
+  );
+  if (conflict) {
+    return {
+      ok: false,
+      reason: 'slot_taken',  // reuse — booking layer already handles this with alts
+      detail:
+        `That new time conflicts with your ${conflict.serviceName} appointment at ` +
+        `${conflict.startTime}. Move that one first, or pick a different time.`,
+      suggestions: await suggestAlternativeSlots(
+        req.businessId,
+        newServiceId ?? appt.service_id,
+        req.preferredDate
+      ),
+    };
+  }
+
+  // 5. UPDATE — EXCLUSION constraint catches double-booking. If the
+  //    service changed, include service_id in the patch so the swap is
+  //    atomic with the time change.
+  const updatePatch: Record<string, string> = {
+    start_time: newStart.toISOString(),
+    end_time: newEnd.toISOString(),
+  };
+  if (serviceChanged && newServiceId) {
+    updatePatch.service_id = newServiceId;
+  }
   const { data: updated, error: updErr } = await getSupabase()
     .from('appointments')
-    .update({
-      start_time: newStart.toISOString(),
-      end_time: newEnd.toISOString(),
-    })
+    .update(updatePatch)
     .eq('id', appt.id)
     .select('id, staff_id')
     .maybeSingle();
@@ -1106,10 +1496,12 @@ export async function rescheduleAppointment(
   if (updErr) {
     // 23P01 = exclusion_violation in PG → staff has another appt at that time
     if (updErr.code === '23P01') {
-      // Try to suggest alternatives
+      // Suggest alternatives against the NEW service if the customer
+      // also changed the service — they're booking against that
+      // service's duration, so alternatives should match it.
       const alternatives = await suggestAlternativeSlots(
         req.businessId,
-        appt.service_id,
+        newServiceId ?? appt.service_id,
         req.preferredDate
       );
       return {
@@ -1153,6 +1545,7 @@ export async function rescheduleAppointment(
     newStart: newStart.toISOString(),
     serviceName: svc.name,
     staffName,
+    serviceChanged,
   };
 }
 
