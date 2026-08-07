@@ -16,6 +16,10 @@ import { childLogger } from './logger';
 //   POST   /onboarding/:businessId/register     — register a new salon with the
 //                                                  SessionManager so a Chromium
 //                                                  session starts and a QR is generated
+//   POST   /onboarding/:businessId/send         — owner-driven outbound send
+//                                                  (proxied from
+//                                                  /api/conversations/:id/owner-reply).
+//                                                  Requires X-Bridge-Token.
 //   DELETE /onboarding/:businessId/session      — disconnect + destroy session
 //
 // The HTML page polls itself every 5–30s so the salon owner sees the QR
@@ -219,6 +223,93 @@ export function createOnboardingRouter(manager: SessionManager): Router {
         return res
           .status(500)
           .json({ error: `Failed to disconnect: ${(e as Error).message}` });
+      }
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // POST /onboarding/:businessId/send
+  //
+  // Owner-driven outbound send. The salon portal's "Take Over Chat" +
+  // textarea → Send button hits the backend's
+  // /api/conversations/:id/owner-reply endpoint, which then proxies
+  // here. The bridge is the only place that owns the live
+  // WhatsAppWebClient instance, so this is where the actual `sendMessage`
+  // call has to land.
+  //
+  // Auth: the calling backend (and only the backend) sets
+  // `X-Bridge-Token: <shared secret>`. We require it here as defense
+  // in depth — a hostile party who guesses the business UUID cannot
+  // drive sends without the token. Mirrors the backend's
+  // requireBridgeToken pattern in routes/bridge.ts.
+  //
+  // Body: { to: string, text: string }
+  //   to   — the customer's chat id in @c.us or LID format (whatever
+  //          whatsapp-web.js expects for client.sendMessage). The
+  //          backend is responsible for resolving the normalized
+  //          phone back to the right format before calling.
+  //   text — the reply text. Trimmed; refused if empty.
+  //
+  // Returns: { ok: true, to } on success.
+  //          401 invalid/missing X-Bridge-Token
+  //          400 missing/empty body fields
+  //          404 no active client for this business (session lost or
+  //               never paired)
+  //          500 sendTextMessage threw — logs and surfaces the error
+  //               so the backend can decide whether to mark the
+  //               owner_message as failed in the messages table.
+  // -------------------------------------------------------------------------
+  router.post(
+    '/onboarding/:businessId/send',
+    async (req: Request, res: Response) => {
+      const expected = process.env.BRIDGE_INTERNAL_TOKEN;
+      if (!expected) {
+        log.warn('BRIDGE_INTERNAL_TOKEN not configured; refusing outbound send');
+        return res
+          .status(503)
+          .json({ error: 'bridge send service not configured' });
+      }
+      if (req.header('x-bridge-token') !== expected) {
+        return res
+          .status(401)
+          .json({ error: 'invalid or missing X-Bridge-Token' });
+      }
+
+      const { businessId } = req.params;
+      const { to, text } = (req.body || {}) as {
+        to?: string;
+        text?: string;
+      };
+
+      if (!to || typeof to !== 'string' || !to.trim()) {
+        return res.status(400).json({ error: 'missing or empty `to`' });
+      }
+      if (!text || typeof text !== 'string' || !text.trim()) {
+        return res.status(400).json({ error: 'missing or empty `text`' });
+      }
+
+      const client = manager.getClient(businessId);
+      if (!client) {
+        return res
+          .status(404)
+          .json({ error: 'No active WhatsApp session for this business' });
+      }
+
+      try {
+        await client.sendTextMessage(to.trim(), text.trim());
+        log.info(
+          { businessId, to, textLength: text.trim().length },
+          'outbound owner-send dispatched'
+        );
+        return res.json({ ok: true, to: to.trim() });
+      } catch (e) {
+        log.error(
+          { businessId, err: (e as Error).message },
+          'outbound owner-send failed'
+        );
+        return res
+          .status(500)
+          .json({ error: `send failed: ${(e as Error).message}` });
       }
     }
   );

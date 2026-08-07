@@ -56,6 +56,18 @@ export interface NextAppointment {
   staff_name: string | null;
 }
 
+/**
+ * Story 18 — single row from the conversation thread endpoint.
+ * `sender_type` matches the `message_sender` Postgres enum:
+ *   'customer' | 'agent' | 'owner'
+ */
+export interface ConversationMessage {
+  id: string;
+  sender_type: "customer" | "agent" | "owner";
+  content: string;
+  created_at: string;
+}
+
 export interface EscalationRow {
   id: string;
   conversation_id: string;
@@ -445,6 +457,109 @@ export const api = {
       }>,
     })),
 
+  /**
+   * Story 18 — full chronological thread for one conversation. Used by
+   * the inbox detail panel to render every customer/agent/owner turn.
+   * Returns [] on backend error rather than throwing, so a transient
+   * failure doesn't blow away the conversation list.
+   */
+  conversationMessages: (conversationId: string) =>
+    withMock<{
+      conversationId: string;
+      messages: ConversationMessage[];
+    }>(`/api/conversations/${conversationId}/messages`, () => ({
+      conversationId,
+      messages: [] as ConversationMessage[],
+    })),
+
+  /**
+   * Wave 2 — owner clicks "Mark Resolved" on an escalation. Flips
+   * escalation_events.resolved=true; the conversation drops out of
+   * the Active sub-tab automatically on the next refresh.
+   */
+  resolveEscalation: (escalationId: string) =>
+    withMock<{ id: string; resolved: boolean; alreadyResolved?: boolean }>(
+      `/api/escalations/${escalationId}/resolve`,
+      () => ({ id: escalationId, resolved: true }),
+      { method: "POST" },
+    ),
+
+  /**
+   * Wave 2 — owner-driven manual send. The backend persists the owner
+   * turn to messages FIRST, then proxies the actual WhatsApp send to
+   * the bridge. Returns sentToBridge=false when the bridge is down —
+   * the messages row is still saved, so the owner can re-send.
+   */
+  ownerReply: (
+    conversationId: string,
+    text: string,
+  ) =>
+    withMock<{
+      ok: boolean;
+      sentToBridge: boolean;
+      messageId: string | null;
+    }>(
+      `/api/conversations/${conversationId}/owner-reply`,
+      () => ({ ok: false, sentToBridge: false, messageId: null }),
+      { method: "POST", body: JSON.stringify({ text }) },
+    ),
+
+  /**
+   * Wave 2 — Resolved sub-tab. Returns conversations whose latest
+   * escalation has resolved=true (sorted by resolved_at desc). Same
+   * row shape as the active list endpoint so the existing renderer
+   * works unchanged.
+   */
+  resolvedEscalations: (businessId: string) =>
+    withMock<{
+      conversations: Array<{
+        id: string;
+        status: string;
+        last_message_at: string;
+        customer: { id: string; name: string | null; phone: string | null };
+        state: {
+          current_intent: string | null;
+          last_customer_msg: string | null;
+          last_agent_msg: string | null;
+          outcome: string | null;
+        };
+        /** ISO timestamp from escalation_events.resolved_at — drives
+         *  the row's "Resolved Xh ago" display label. */
+        resolved_at: string | null;
+        next_appointment: unknown | null;
+      }>;
+    }>(`/api/business/${businessId}/resolved-escalations`, () => ({
+      conversations: [],
+    })),
+
+  /**
+   * Story 13 — owner-side kill switch. Flips the salon's agent_active
+   * column. Distinct from setAgentActive() (which is superadmin-only —
+   * hits /api/salons/:id/agent). When active=false the backend stops
+   * the bot from replying, but customer messages are still persisted
+   * to the messages table so the owner can read them in the inbox.
+   */
+  setMyAgentActive: (businessId: string, active: boolean) =>
+    withMock<{ id: string; agent_active: boolean }>(
+      `/api/business/${businessId}/agent-active`,
+      () => ({ id: businessId, agent_active: active }),
+      {
+        method: "PATCH",
+        body: JSON.stringify({ agent_active: active }),
+      },
+    ),
+
+  /**
+   * Story 13 — read the owner's current agent_active state. Used by
+   * the toggle to render its initial state without pulling the full
+   * business row.
+   */
+  getMyAgentActive: (businessId: string) =>
+    withMock<{ id: string; agent_active: boolean }>(
+      `/api/business/${businessId}/agent-active`,
+      () => ({ id: businessId, agent_active: true }),
+    ),
+
   services: (businessId: string) =>
     withMock(`/api/business/${businessId}/services`, () => ({
       services: [] as ServiceRow[],
@@ -659,6 +774,12 @@ export const qk = {
   onboarding: (id: string) => ["onboarding", id] as const,
   staff: (id: string) => ["staff", id] as const,
   conversations: (id: string) => ["conversations", id] as const,
+  conversationMessages: (id: string) =>
+    ["conversations", id, "messages"] as const,
+  resolvedEscalations: (id: string) =>
+    ["resolved-escalations", id] as const,
+  myAgentActive: (id: string) =>
+    ["agent-active", id] as const,
   services: (id: string) => ["services", id] as const,
   dashboardStats: (id: string) => ["dashboard-stats", id] as const,
   escalations: (id: string) => ["escalations", id] as const,

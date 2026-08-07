@@ -7,6 +7,13 @@ import {
   updateConversationState,
   touchConversation,
   recordEscalation,
+  saveMessage,
+  isAgentActive,
+  updateCustomerNameIfMissing,
+  isLidFormat,
+  markConversationNeedsReviewLid,
+  upsertCustomerChatId,
+  isGroupChat,
 } from './db';
 import { generateReply } from './llm';
 import { processBookingDecision } from './booking';
@@ -172,6 +179,78 @@ async function handleIncomingMessageInner(
     };
   }
 
+  // Group-chat / non-personal-chat filter.
+  //
+  // whatsapp-web.js sometimes hands us group JIDs ("120363207662725526"
+  // — bare 15-18 digit chat identifiers with no separator and no
+  // @c.us / @lid suffix). These are NOT 1:1 customer messages; they're
+  // messages from groups the bot was added to. Treating them as
+  // customers polluted customers.phone with bridge-internal ids that
+  // can't be used for outbound sends (Send button returned "No LID
+  // for user" because these aren't user chatIds at all).
+  //
+  // Skip them at the entry: log, drop, return reply=null. The
+  // transport layer treats reply=null as "don't send anything".
+  // We never create a customer row, never start an LLM call, never
+  // burn quota on a non-actionable message.
+  if (isGroupChat(from)) {
+    requestLog.info(
+      { from },
+      'group_chat_skipped — not a 1:1 customer message'
+    );
+    return {
+      reply: null,
+      conversationId: null,
+      customerId: null,
+      appointment: 'not_attempted',
+    };
+  }
+
+  // Story 13 — owner pause. If the salon's AI is paused (agent_active=false),
+  // still log the incoming customer message so the owner can see it in the
+  // inbox, but skip the LLM entirely and return reply=null. The transport
+  // treats null as "don't send anything back" — the customer sees nothing.
+  // isAgentActive() is best-effort: if the DB lookup itself fails, we
+  // fail-open (treat as active) so a transient DB hiccup doesn't silently
+  // drop replies for an active salon.
+  let agentPaused = false;
+  try {
+    agentPaused = !(await isAgentActive(businessId));
+  } catch (e) {
+    requestLog.warn(
+      { err: (e as Error).message },
+      'agent_active lookup failed — fail-open, treating as active',
+    );
+    agentPaused = false;
+  }
+  if (agentPaused) {
+    try {
+      // Resolve customer + conversation so the message lands in the right
+      // thread. Skip updateConversationState (no LLM-extracted slots to
+      // persist) but DO write the raw turn to messages so the owner sees
+      // it in the inbox when they un-pause.
+      const pausedCustomerId = await getOrCreateCustomer(customerPhone);
+      const pausedConversationId = await getOrCreateConversation(businessId, pausedCustomerId);
+      await saveMessage(pausedConversationId, 'customer', text);
+      await touchConversation(pausedConversationId);
+      requestLog.info(
+        { conversationId: pausedConversationId },
+        'ai_paused_skipping_reply',
+      );
+    } catch (e) {
+      requestLog.warn(
+        { err: (e as Error).message },
+        'paused-mode message persistence failed (non-fatal)',
+      );
+    }
+    return {
+      reply: null,
+      conversationId: null,
+      customerId: null,
+      appointment: 'not_attempted',
+    };
+  }
+
   requestLog.info({ textLength: text.length }, 'incoming message');
 
   let conversationId: string | null = null;
@@ -182,10 +261,41 @@ async function handleIncomingMessageInner(
     customerId = await getOrCreateCustomer(customerPhone);
     conversationId = await getOrCreateConversation(businessId, customerId);
 
+    // Step 1.5: LID-format detection. whatsapp-web.js sometimes hands
+    // us a dash-separated identifier (e.g. "966541183544-1454589702")
+    // instead of the normal "+ccphone@c.us" shape. Per team decision
+    // (2026-08-07) we don't silently drop these — we flag them with a
+    // dedicated escalation_events row so the owner sees them in the
+    // Escalations tab with a "needs review" badge. The phone is still
+    // stored as the normalized digits (via getOrCreateCustomer above)
+    // so cross-customer uniqueness still works.
+    //
+    // Idempotent inside markConversationNeedsReviewLid(); safe to call
+    // on every message turn from this customer. Best-effort — failure
+    // here is non-fatal.
+    if (isLidFormat(opts.from)) {
+      await markConversationNeedsReviewLid(conversationId, opts.from);
+    }
+
+    // Step 1.6: persist the raw WhatsApp identifier (wa_chat_id) so
+    // the owner-reply endpoint can route outbound sends back to the
+    // same identifier scheme WhatsApp handed us. Both `@c.us` and
+    // LID-format strings get written — only the SEND path needs the
+    // LID case, but writing the @c.us case is harmless and keeps
+    // the column consistent.
+    //
+    // Idempotent inside upsertCustomerChatId(); safe to call on
+    // every turn. Best-effort.
+    await upsertCustomerChatId(customerId, opts.from);
+
     await updateConversationState(conversationId, {
       last_customer_msg: text,
     });
     await touchConversation(conversationId);
+    // Story 18 — also write the raw turn to the `messages` table so the
+    // owner-facing inbox can render the chat log. Best-effort; failure
+    // here is logged inside saveMessage() and does not break the reply.
+    await saveMessage(conversationId, 'customer', text);
 
     requestLog.debug({ conversationId }, 'persistence steps complete');
   } catch (e) {
@@ -282,6 +392,28 @@ async function handleIncomingMessageInner(
           'booking decision'
         );
       }
+
+      // Step 6b: persist the LLM-extracted customer_name to
+      // customers.name — but ONLY if the column is currently empty.
+      // The slot was already mirrored into conversation_state above;
+      // this back-fills the human-readable display column that the
+      // inbox list reads. Without it, the dashboard kept showing the
+      // raw phone number as the display name even after the bot knew
+      // the customer's name.
+      //
+      // Idempotent and non-overwriting by construction — see
+      // updateCustomerNameIfMissing() in db.ts. Safe to call on
+      // every turn; it short-circuits when the name already exists.
+      if (llmResult.customer_name) {
+        try {
+          await updateCustomerNameIfMissing(customerId, llmResult.customer_name);
+        } catch (e) {
+          requestLog.warn(
+            { err: (e as Error).message },
+            'customer.name backfill failed (non-fatal)'
+          );
+        }
+      }
     } else {
       // No conversation (persistence failed) — use LLM reply verbatim
       finalReply = llmResult.reply;
@@ -302,6 +434,10 @@ async function handleIncomingMessageInner(
         last_agent_msg: finalReply,
       });
       await touchConversation(conversationId);
+      // Story 18 — also write the agent turn to the `messages` table
+      // so the inbox view renders it. saveMessage() is itself
+      // best-effort and swallows its own errors.
+      await saveMessage(conversationId, 'agent', finalReply);
     } catch (e) {
       requestLog.warn(
         { err: (e as Error).message },

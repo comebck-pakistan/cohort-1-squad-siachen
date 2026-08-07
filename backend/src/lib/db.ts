@@ -31,6 +31,301 @@ export async function getBusinessIdForPhoneNumberId(phoneNumberId: string): Prom
 }
 
 /**
+ * Story 13 — read whether this business's AI is currently enabled.
+ *
+ * Called by handleIncomingMessage() at the top of every turn to decide
+ * whether to skip the LLM. Defaults to TRUE (active) if the row is
+ * missing or the lookup errors — fail-open is the right choice here,
+ * because the alternative (fail-closed) silently drops replies for a
+ * salon that just hit a transient DB hiccup.
+ *
+ * The kill switch on the column comment reads: "kill switch
+ * (superadmin OR owner pause)" — both surfaces flip the same field.
+ */
+/**
+ * Set the customer's display name IF they don't already have one.
+ *
+ * Called from message-handler.ts when the LLM extracts a `customer_name`
+ * slot. The bot learns the customer's name in conversation_state first
+ * (per the slot-locking prompt rules), but customers.name is the field
+ * the inbox list / dashboard render for the display label — without this
+ * helper, every conversation kept showing the raw phone number as the
+ * display name even after the bot knew the customer's name.
+ *
+ * Guard rails:
+ *   - Refuses to write when the customer already has a non-empty name.
+ *     We never overwrite a name the owner or a prior session may have
+ *     set — even if the LLM "corrects" itself, that's a human decision.
+ *   - Refuses to write empty / whitespace-only / placeholder values
+ *     ("unknown", "customer", "—", phone-shaped strings).
+ *   - Trims before checking length and before writing.
+ *   - Best-effort: logs and swallows any error so the bot's reply path
+ *     is never blocked by a name-write hiccup.
+ */
+/**
+ * True when the phone identifier from whatsapp-web.js looks like a
+ * LID-format string instead of a normal `@c.us` identifier.
+ *
+ * whatsapp-web.js (used by the WhatsApp-Web transport) sometimes hands
+ * us IDs shaped like `966541183544-1454589702` — digits, a dash, more
+ * digits — with no `@c.us` (or `@lid`) suffix. These come from a
+ * newer WhatsApp client-side identifier scheme and we don't yet know
+ * whether every one of them maps cleanly to a real phone number.
+ *
+ * We don't want to silently drop the customer message (per team
+ * decision 2026-08-07) because we don't yet know if it's a real
+ * customer or a client-side quirk. Instead we flag the conversation
+ * via markConversationNeedsReviewLid() so it shows up in the
+ * Escalations tab with a clear visual badge for the owner to triage.
+ *
+ * Important: this is BEFORE @-suffix normalization. The matching
+ * normalizePhone() strips at the first `@`, so any string with a dash
+ * and no `@` is suspicious. We deliberately do NOT flag normal
+ * @c.us / @lid identifiers — only the dash-only shape.
+ */
+export function isLidFormat(rawPhone: string): boolean {
+  if (!rawPhone) return false;
+  // If there's any @ at all, it's a normal WhatsApp identifier
+  // (either @c.us for individual chats or @lid for the LID scheme).
+  if (rawPhone.includes('@')) return false;
+  // The LID-format shape: digits, a dash, more digits. We require
+  // BOTH sides to be digit-heavy so we don't accidentally flag
+  // already-normalized phone numbers that happen to contain a dash.
+  const m = rawPhone.match(/^(\d+)-(\d+)$/);
+  if (!m) return false;
+  // Sanity check: both halves should look phone-shaped (>= 6 digits).
+  // Pure LID strings in the wild are typically 12-15 digits on the
+  // left (the phone) and 8-12 on the right (the per-account suffix).
+  return m[1].length >= 6 && m[2].length >= 4;
+}
+
+/**
+ * True when the identifier is for a WhatsApp GROUP (not a 1:1 customer).
+ *
+ * Detected by:
+ *   1. Explicit `@g.us` suffix in any position. WhatsApp's
+ *      canonical group JID is `<group-id>@g.us` where group-id is
+ *      typically 15-18 digits.
+ *   2. 15-18 digit bare numerics with no separators. This is the
+ *      newer whatsapp-web.js shape where the `@g.us` suffix has
+ *      been stripped — common since mid-2026. Examples:
+ *        "120363207662725526"  (18 digits, group)
+ *        "158536017404126"     (15 digits, group)
+ *        "279989102588003"     (15 digits, group)
+ *      These look superficially like phone numbers but they're
+ *      chat JIDs — you can't 1:1 message them.
+ *
+ * Note this is a heuristic for the 15-18 digit case — a real
+ * Pakistani phone number is 12 digits starting with `92`, and a
+ * real US number is 10-11 digits starting with `1`. So 15-18
+ * digits with no separator is almost certainly a chat JID.
+ *
+ * Caller: handleIncomingMessage() at the very top, to skip group
+ * messages entirely. They should never become customer rows in
+ * our DB (a group isn't a customer), and replying to a group
+ * message with a 1:1 send produces "No LID for user" errors.
+ */
+export function isGroupChat(rawFrom: string): boolean {
+  if (!rawFrom) return false;
+  // Case 1: explicit @g.us suffix
+  if (rawFrom.includes('@g.us')) return true;
+  // Case 2: 15-18 digit bare numeric with no separators — chat JID
+  if (/^\d{15,18}$/.test(rawFrom)) return true;
+  // Case 3: LID-format with @g.us suffix (rare but possible)
+  if (/^\d+-\d+@g\.us$/.test(rawFrom)) return true;
+  return false;
+}
+
+/**
+ * Stamp the customer's wa_chat_id (raw WhatsApp identifier) IF we
+ * don't already have one OR the existing one differs from this one.
+ *
+ * whatsapp-web.js hands us customer identifiers in one of two
+ * shapes:
+ *   1. Normal     — "<digits>@c.us"   (e.g. "923001234567@c.us")
+ *   2. LID-format — "<digits>-<digits>" with no "@" suffix
+ *                    (e.g. "966541183544-1454589702")
+ *
+ * Until now we only stored the normalized digits in customers.phone.
+ * That works for inbound routing, but breaks outbound: the
+ * owner-reply endpoint constructs `${phone}@c.us`, and WhatsApp
+ * rejects it with "No LID for user" when the customer's actual
+ * identifier is in LID format.
+ *
+ * This helper stores the raw `from` value exactly as whatsapp-web.js
+ * handed it to us, so the owner-reply endpoint can pass it back
+ * verbatim. Both shapes are valid WhatsApp chatIds and round-trip
+ * cleanly.
+ *
+ * Guard rails:
+ *   - Refuses to write empty / whitespace-only values. Nothing
+ *     useful to store.
+ *   - Idempotent: if the customer already has a non-null
+ *     wa_chat_id, we don't overwrite it. This matters because if
+ *     a customer's identifier ever changes (e.g. they re-install
+ *     WhatsApp and the new client hands us a different LID), we
+ *     want the next inbound message to overwrite — but we don't
+ *     want to overwrite on EVERY message (would just churn DB
+ *     writes for no benefit and risk races).
+ *
+ *     The "overwrite if different" rule is the right balance:
+ *     stable identifier → 1 write total. New identifier after
+ *     re-install → 1 write to update.
+ *   - Best-effort: logs and swallows any error so the customer's
+ *     reply path is never blocked by a wa_chat_id hiccup.
+ *
+ * Caller: message-handler.ts on every inbound turn. Both LID-format
+ * and normal @c.us identifiers get written — we always want the
+ * most accurate identifier available for outbound.
+ */
+export async function upsertCustomerChatId(
+  customerId: string,
+  candidateChatId: string | null | undefined
+): Promise<void> {
+  if (!candidateChatId) return;
+  const trimmed = candidateChatId.trim();
+  if (trimmed.length === 0) return;
+
+  // Conditional UPDATE — only flip wa_chat_id where it's currently
+  // NULL OR differs from the new value. The OR condition lets us
+  // pick up identifier changes (re-installs) without churning the
+  // column on every turn for stable customers.
+  //
+  // We compare with .neq('wa_chat_id', trimmed) which Postgres
+  // treats as NULL-safe in Supabase: NULL != '<value>' so the
+  // .or() catches both "no row" and "different value".
+  const { error } = await getSupabase()
+    .from('customers')
+    .update({ wa_chat_id: trimmed })
+    .eq('id', customerId)
+    .or(`wa_chat_id.is.null,wa_chat_id.neq.${trimmed}`);
+
+  if (error) {
+    console.warn(
+      `[db.ts] upsertCustomerChatId failed (customer=${customerId}):`,
+      error.message
+    );
+  }
+}
+
+/**
+ * Stamp a conversation as needing human review because the originating
+ * customer identifier was in LID format (see isLidFormat()).
+ *
+ * We reuse the existing escalation_events table with a dedicated
+ * reason value so this surfaces in the same Escalations tab as
+ * customer_complaint / low_confidence — no schema change required.
+ * Idempotent within a short window via .maybeSingle() precondition:
+ * only writes if no unresolved LID-format escalation exists yet.
+ *
+ * Returns silently on error — the customer's reply path is more
+ * important than the flag, and the message-handler logs the failure.
+ */
+export async function markConversationNeedsReviewLid(
+  conversationId: string,
+  rawPhone: string
+): Promise<void> {
+  try {
+    // Cheap idempotency: only insert if no existing unresolved
+    // LID-flag row for this conversation. (A resolved-then-flagged-
+    // again cycle is allowed because the owner might clear the flag
+    // and the same customer might message again with the same LID.)
+    const { data: existing } = await getSupabase()
+      .from('escalation_events')
+      .select('id')
+      .eq('conversation_id', conversationId)
+      .eq('reason', 'needs_review_lid_format')
+      .eq('resolved', false)
+      .maybeSingle();
+
+    if (existing) return;
+
+    const { error } = await getSupabase()
+      .from('escalation_events')
+      .insert({
+        conversation_id: conversationId,
+        reason: 'needs_review_lid_format',
+        // ai_draft_response captures the raw LID string so the owner
+        // can see WHICH identifier surfaced this flag when triaging.
+        ai_draft_response: `customer_phone=${rawPhone}`,
+      });
+
+    if (error) {
+      console.warn(
+        `[db.ts] markConversationNeedsReviewLid failed (conversation=${conversationId}):`,
+        error.message
+      );
+    }
+  } catch (e) {
+    console.warn(
+      `[db.ts] markConversationNeedsReviewLid threw (conversation=${conversationId}):`,
+      (e as Error).message
+    );
+  }
+}
+
+export async function updateCustomerNameIfMissing(
+  customerId: string,
+  candidateName: string | null | undefined
+): Promise<void> {
+  if (!candidateName) return;
+  const trimmed = candidateName.trim();
+  if (trimmed.length === 0) return;
+
+  // Reject obvious placeholders / non-names so we don't pollute the
+  // column with "unknown", "—", or a phone number accidentally pasted
+  // in. Anything that looks phone-shaped (>=8 digits, mostly digits)
+  // is treated as not-a-name.
+  const lower = trimmed.toLowerCase();
+  if (
+    lower === 'unknown' ||
+    lower === 'customer' ||
+    lower === '—' ||
+    lower === '-' ||
+    lower === 'n/a' ||
+    lower === 'null'
+  ) {
+    return;
+  }
+  const digitCount = (trimmed.match(/\d/g) ?? []).length;
+  if (digitCount >= 8) return;
+
+  // Conditional UPDATE — only flip name where it's currently NULL or
+  // empty. RLS-safe; the customer row's policy lets us update our own
+  // customer's name. If the row was concurrently updated by another
+  // turn, the .eq('name', '')'s filter simply no-ops, which is fine.
+  const { error } = await getSupabase()
+    .from('customers')
+    .update({ name: trimmed })
+    .eq('id', customerId)
+    .or('name.is.null,name.eq.');
+
+  if (error) {
+    // Non-fatal — name persistence is decoration on top of the reply
+    // path. A failure here should not break the customer's reply.
+    console.warn(
+      `[db.ts] updateCustomerNameIfMissing failed (customer=${customerId}):`,
+      error.message
+    );
+  }
+}
+
+export async function isAgentActive(businessId: string): Promise<boolean> {
+  const { data, error } = await getSupabase()
+    .from('businesses')
+    .select('agent_active')
+    .eq('id', businessId)
+    .maybeSingle();
+
+  if (error) {
+    console.warn(`[db.ts] isAgentActive lookup failed: ${error.message}`);
+    return true; // fail-open
+  }
+  if (!data) return true; // missing row → assume active
+  return data.agent_active !== false;
+}
+
+/**
  * Find an existing customer by phone, or create one.
  *
  * Race-safe: uses upsert so two concurrent requests for the same
@@ -139,40 +434,103 @@ export async function getOrCreateConversation(
 }
 
 /**
- * @deprecated No-op stub. Bot no longer writes raw messages to the
- * `messages` table. Use `updateConversationState()` instead — that
- * writes to `conversation_state`, which is now the source of truth
- * per `docs/SUPABASE_CHANGELOG.md` (2026-07-22).
+ * Append a single message row to the `messages` table.
  *
- * Kept as a no-op so existing callers (webhook.ts, demo.ts) don't
- * break during migration. Safe to delete once those callers are
- * fully migrated to updateConversationState().
+ * Story 18 — restores the chat transcript that the salon owner sees
+ * in /salon-portal/inbox, that superadmin reads cross-salon, and that
+ * any future usage/cost tracking will roll up from. Writes are
+ * best-effort: a failure is logged but never propagated, so a
+ * transient DB hiccup doesn't kill the customer's reply.
+ *
+ * The `messages` table is intentionally separate from
+ * `conversation_state` — state holds the STRUCTURED slots the LLM
+ * reasons over, messages hold the raw turn-by-turn chat log. They
+ * stay in sync because the same handler writes both.
  */
 export async function saveMessage(
   conversationId: string,
   senderType: SenderType,
   content: string
 ): Promise<void> {
-  console.warn(
-    '[saveMessage] deprecated no-op — conversation_state is now the source of truth (see docs/SUPABASE_CHANGELOG.md 2026-07-22)'
-  );
+  if (!content || content.trim().length === 0) return;
+  const { error } = await getSupabase()
+    .from('messages')
+    .insert({
+      conversation_id: conversationId,
+      sender_type: senderType,
+      content,
+    });
+  if (error) {
+    // Non-fatal — log + carry on. The bot's reply path must not fail
+    // because the transcript write failed.
+    console.warn(
+      `[db.ts] saveMessage failed (conversation=${conversationId} sender=${senderType}):`,
+      error.message
+    );
+  }
 }
 
 /**
- * @deprecated Returns []. Messages table no longer holds live data;
- * structured `conversation_state` is the source of truth. Use
- * `getConversationStateForPrompt()` instead, which returns a
- * formatted markdown block the bot includes in its system prompt.
+ * Return the most recent N turns of a conversation, ordered oldest-first.
  *
- * Kept as a no-op stub returning [] so existing callers don't
- * break during migration.
+ * Used by the LLM prompt to inject raw chat history into the bot's
+ * context — `conversation_state` carries structured slots, but for
+ * short back-and-forth the verbatim transcript is what the LLM
+ * actually needs to disambiguate pronouns, follow-ups, etc.
  */
 export async function getRecentMessages(
   conversationId: string,
   limit: number = 10
 ): Promise<Array<{ role: 'user' | 'assistant'; content: string }>> {
-  // Intentionally returns [] — see deprecation note above.
-  return [];
+  const { data, error } = await getSupabase()
+    .from('messages')
+    .select('sender_type, content, created_at')
+    .eq('conversation_id', conversationId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error || !data) {
+    console.warn(`[db.ts] getRecentMessages failed: ${error?.message}`);
+    return [];
+  }
+  // We selected newest-first; reverse so the prompt sees oldest-first.
+  return data.reverse().map((m) => ({
+    role: m.sender_type === 'customer' ? 'user' : 'assistant',
+    content: m.content,
+  }));
+}
+
+/**
+ * Return the FULL chronological thread for a conversation. Used by the
+ * owner-facing inbox view (Story 18) and any superadmin drill-in.
+ *
+ * RLS on the messages table already enforces that only the business
+ * owner / superadmin can read rows for their own conversations, so we
+ * don't add an extra ownership check here — the DB is the gate.
+ */
+export interface MessageRow {
+  id: string;
+  sender_type: SenderType;
+  content: string;
+  created_at: string;
+}
+
+export async function getMessageThread(
+  conversationId: string,
+  limit: number = 500
+): Promise<MessageRow[]> {
+  const { data, error } = await getSupabase()
+    .from('messages')
+    .select('id, sender_type, content, created_at')
+    .eq('conversation_id', conversationId)
+    .order('created_at', { ascending: true })
+    .limit(limit);
+
+  if (error) {
+    console.warn(`[db.ts] getMessageThread failed: ${error.message}`);
+    return [];
+  }
+  return (data ?? []) as MessageRow[];
 }
 
 /**
