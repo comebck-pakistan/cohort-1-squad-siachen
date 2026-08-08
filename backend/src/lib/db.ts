@@ -136,6 +136,125 @@ export function isGroupChat(rawFrom: string): boolean {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// Medical-concern detector — keyword/pattern check that runs INDEPENDENTLY
+// of the LLM. We do NOT trust the LLM to flag medical concerns reliably:
+// it can bucket health-adjacent questions under intent='other' with high
+// confidence, and the LLM is not trained to escalate health concerns
+// without being told. The salon owner needs to be notified whenever a
+// customer asks about allergic reactions, pain/injury, pregnancy, skin
+// /scalp/rash/infection symptoms, or "is X safe for Y" safety queries —
+// even if the bot would otherwise reply politely and decline.
+//
+// The pattern list is intentionally broad-but-focused: we want to catch
+// symptomatic phrasing ("I have a rash", "my hand is swelling") plus
+// safety queries ("is this safe for pregnant?"), without false-firing
+// on services that happen to mention skin or nails
+// ("I want a skin facial", "what's your nail art service").
+//
+// Tighter than the LLM-based intent check because we're catching a
+// narrower set of intents — health-adjacent questions only.
+// ---------------------------------------------------------------------------
+
+const MEDICAL_PATTERNS: RegExp[] = [
+  // === Allergic reaction / hypersensitivity ===
+  /\ballergic?\b/i,            // allergic, allergy
+  /\bhives\b/i,
+  /\bswell(?:ing|ed|en)?\b/i,
+  /\bswollen\b/i,              // past participle — not covered by the above
+  /\bnettle\s*rash\b/i,
+
+  // === Skin / scalp / rash / infection symptoms ===
+  /\brash\b/i,
+  // Broader infection coverage — "infected" / "infecting" / "infects"
+  // were missed by the original `\binfection\b` exact-word match.
+  /\binfect(?:ion|ed|ing|s)?\b/i,
+  /\bpus\b/i,                  // the medical term
+  /\bpuss\b/i,                 // common typo
+  /\babscess\b/i,              // localized infection
+  /\bdischarge\b/i,            // symptom
+  /\bsmelly\b/i,               // customer word for foul odor
+  /\bsor(?:e|eness)\b/i,        // sore, soreness
+  /\bitch(?:y|ing|iness)?\b/i,
+  /\beczema\b/i,
+  /\bpsoriasis\b/i,
+  /\bbumps?\b/i,
+  /\bblister(?:s|ed|ing)?\b/i,
+  /\bscab(?:s|bing)?\b/i,
+  /\bflak(?:y|ing)\b/i,
+  /\bred\s+spots?\b/i,
+
+  // === Pain / injury ===
+  /\bpa[ie]n\b/i,              // pain, pein (common typo)
+  /\bhurt(?:s|ing)?\b/i,
+  /\binjur(?:y|ed|ies)\b/i,
+  /\bbleeding\b/i,
+  /\bburn(?:s|ed|ing)?\b/i,
+  /\bwound\b/i,
+
+  // === Pregnancy / nursing ===
+  /\bpregnan(?:t|cy)\b/i,
+  /\bbreastfeeding\b/i,
+  /\bnursing\b/i,
+  /\bexpecting\b/i,
+  /\btrimester\b/i,
+  /\bbreastfeed\b/i,
+
+  // === Safety queries — "is X safe for Y" ===
+  /safe\s+for\s+(?:my|me|kids?|children|baby|skin|child|pregnant|sensitive|face|scalp)/i,
+  /is\s+(?:this|that|it)\s+safe/i,
+  /can\s+i\s+(?:use|get|have|do)\s+(?:this|that|it)\s+(?:while|during|if|when)\b/i,
+  /\bsafe\s+hai\b/i,           // Roman Urdu: "is it safe"
+
+  // === Medical-care vocabulary (safety net for symptoms customers
+  //     describe without using the precise medical term) ===
+  /\bdoctor\b/i,               // "see a doctor"
+  /\bdermatologist\b/i,        // skin specialist
+  /\bemergency\b/i,            // medical emergency
+  /\bhospital\b/i,             // hospital
+  /\bmedical\b/i,              // generic safety net ("medical insurance",
+                               // "medical condition", "medical expenses")
+];
+
+/**
+ * Return true if the customer message contains a clear medical-concern
+ * signal. This is the hard-keyword path — when it returns true the
+ * producer should create an escalation_events row with
+ * reason='medical_concern' regardless of what the LLM returns.
+ */
+export function detectMedicalConcern(text: string): boolean {
+  if (!text) return false;
+  return MEDICAL_PATTERNS.some((re) => re.test(text));
+}
+
+// ---------------------------------------------------------------------------
+// Edge case rules — owned by the platform (business_id IS NULL) and by
+// individual salons. Returned as a single flat list for the LLM prompt.
+// ---------------------------------------------------------------------------
+
+export interface EdgeCaseRule {
+  rule_text: string;
+  rule_type: string; // 'hard' | 'soft'
+}
+
+export async function getEdgeCaseRules(
+  businessId: string
+): Promise<EdgeCaseRule[]> {
+  // Platform-level rules (business_id IS NULL) + per-salon rules
+  // (business_id = this). Inactive rows are filtered out.
+  const { data, error } = await getSupabase()
+    .from('edge_case_rules')
+    .select('rule_text, rule_type')
+    .eq('is_active', true)
+    .or(`business_id.is.null,business_id.eq.${businessId}`);
+
+  if (error) {
+    console.warn('[db.ts] getEdgeCaseRules failed:', error.message);
+    return [];
+  }
+  return (data || []) as EdgeCaseRule[];
+}
+
 /**
  * Stamp the customer's wa_chat_id (raw WhatsApp identifier) IF we
  * don't already have one OR the existing one differs from this one.
@@ -845,6 +964,21 @@ export interface SalonHours {
   close_time: string | null;
 }
 
+/**
+ * One-off salon closure (public holiday, owner vacation, etc.) that
+ * overrides the weekly hours for that specific date. Surfaced in the
+ * LLM system prompt so the bot can answer "open on 14 Aug?" questions
+ * correctly — otherwise the LLM hallucinates from weekly hours alone.
+ */
+export interface SalonHoliday {
+  /** ISO date YYYY-MM-DD in PKT. */
+  date: string;
+  /** Human-readable label the owner typed in the UI ("Azaadi day"). */
+  reason: string;
+  /** Raw enum bucket from the holidays table — useful for future filtering. */
+  reason_kind: string;
+}
+
 export interface SalonContext {
   business_id: string;
   name: string;
@@ -852,6 +986,15 @@ export interface SalonContext {
   timezone: string;
   services: SalonService[];
   hours: SalonHours[];
+  /** Upcoming one-off closures (date >= today, max 30). Owners set these
+   *  via the salon's "Holidays & Closures" tab. The LLM uses this list
+   *  to answer "is the salon open on X?" questions correctly — weekly
+   *  hours do NOT apply on closure dates. */
+  holidays: SalonHoliday[];
+  /** Active edge-case guardrails (platform-level + per-salon). The LLM
+   *  uses these to refuse out-of-scope asks (medical, refund, comparison)
+   *  consistently with the keyword detection in message-handler.ts. */
+  edge_case_rules: EdgeCaseRule[];
   staff_count: number;
   is_configured: boolean; // true if at least one service is loaded
   /** Current wall-clock time in Asia/Karachi as ISO-8601 with +05:00 offset.
@@ -904,6 +1047,8 @@ export async function getSalonContext(businessId: string): Promise<SalonContext>
     timezone: 'Asia/Karachi',
     services: [],
     hours: [],
+    holidays: [],
+    edge_case_rules: [],
     staff_count: 0,
     is_configured: false,
     current_datetime_pkt: currentDatetimePkt,
@@ -949,6 +1094,37 @@ export async function getSalonContext(businessId: string): Promise<SalonContext>
   if (hours) {
     ctx.hours = hours as SalonHours[];
   }
+
+  // Upcoming owner-set closures. Only future dates are useful for the
+  // LLM prompt — past closures are stale. Capped at 30 rows so a
+  // long-running salon can't bloat the prompt with old data.
+  const { data: holidays } = await getSupabase()
+    .from('holidays')
+    .select('date, reason, note')
+    .eq('business_id', businessId)
+    .gte('date', todayPkt)
+    .order('date', { ascending: true })
+    .limit(30);
+  if (holidays) {
+    ctx.holidays = (
+      holidays as Array<{ date: string; reason: string; note: string | null }>
+    ).map((h) => ({
+      date: h.date,
+      // Prefer the human-readable note (e.g. "Azaadi day") over the raw
+      // enum bucket. The UI always writes note=<text>, reason='other',
+      // so note is the source of truth for the customer-facing label.
+      reason: h.note || h.reason || 'closure',
+      reason_kind: h.reason,
+    }));
+  }
+
+  // Active edge-case guardrails (platform-level + per-salon). The LLM
+  // uses these to refuse out-of-scope asks (medical, refund, comparison)
+  // consistently with the keyword detection in message-handler.ts.
+  // Without this list the LLM has no idea what the salon's rules are
+  // and may give conflicting advice on, e.g., refund policy.
+  const edgeRules = await getEdgeCaseRules(businessId);
+  ctx.edge_case_rules = edgeRules;
 
   // Staff headcount (active only)
   const { count } = await getSupabase()
@@ -1347,6 +1523,28 @@ async function isWithinBusinessHours(
   date: string,
   time: string
 ): Promise<{ ok: boolean; detail: string }> {
+  // Holiday check FIRST — closures win over weekly hours. If the
+  // requested date is on the owner's closure list, reject even when
+  // the weekly schedule has the salon marked "open". Cheap single-row
+  // lookup; the holidays table is small (single-digit rows per
+  // business) and indexed on (business_id, date).
+  const { data: holiday, error: holidayErr } = await getSupabase()
+    .from('holidays')
+    .select('note, reason')
+    .eq('business_id', businessId)
+    .eq('date', date)
+    .maybeSingle();
+  if (holidayErr) {
+    console.warn('[db.ts] holiday lookup failed (continuing):', holidayErr.message);
+  }
+  if (holiday) {
+    const label = holiday.note || holiday.reason || 'closure';
+    return {
+      ok: false,
+      detail: `Salon is closed on ${date} (${label})`,
+    };
+  }
+
   const dow = dayOfWeekFromIsoDate(date);
   if (!dow) return { ok: false, detail: 'Could not parse date' };
 
@@ -2013,18 +2211,61 @@ async function suggestAlternativeSlots(
 //   - 'customer_complaint'  — LLM intent='complaint'
 //   - 'low_confidence'      — LLM confidence < 30 and not 'book'/'cancel'/'reschedule'
 //   - 'customer_request_human' — LLM intent='other' but customer asked for a human
+//   - 'medical_concern'     — keyword/pattern match on health-adjacent phrasing
+//   - 'abusive_language'    — keyword/pattern match on abusive/threatening language
+//
+// Idempotency: this function is called on EVERY customer message turn
+// (the producer sits inside message-handler.ts:339-371). Without
+// dedupe, a customer who sends 5 angry messages in a row creates 5
+// separate rows for the same conversation. We mirror the pattern in
+// markConversationNeedsReviewLid() above: check for an existing
+// UNRESOLVED row of the SAME reason first, and if one exists, just
+// touch its timestamp + update the ai_draft_response. The Resolved
+// sub-tab picks the latest escalation per conversation anyway, so the
+// "touch" semantics keep the row at the top of the Active list while
+// preserving the original created_at for resolved-history sorting.
+//
+// A different reason always inserts a new row (e.g. a customer who
+// transitions from angry to medical-question creates both rows).
 // ---------------------------------------------------------------------------
 
 export type EscalationReason =
   | 'customer_complaint'
   | 'low_confidence'
-  | 'customer_request_human';
+  | 'customer_request_human'
+  | 'medical_concern'
+  | 'abusive_language';
 
 export async function recordEscalation(
   conversationId: string,
   reason: EscalationReason,
   aiDraftResponse: string | null
 ): Promise<void> {
+  // Cheap idempotency: only insert if no existing UNRESOLVED row of
+  // the SAME reason exists for this conversation. If one exists, just
+  // refresh it so the Active list shows it as fresh.
+  const { data: existing } = await getSupabase()
+    .from('escalation_events')
+    .select('id')
+    .eq('conversation_id', conversationId)
+    .eq('reason', reason)
+    .eq('resolved', false)
+    .maybeSingle();
+
+  if (existing) {
+    const { error } = await getSupabase()
+      .from('escalation_events')
+      .update({
+        ai_draft_response: aiDraftResponse,
+        created_at: new Date().toISOString(),
+      })
+      .eq('id', existing.id);
+    if (error) {
+      console.warn('[db.ts] recordEscalation touch failed:', error.message);
+    }
+    return;
+  }
+
   const { error } = await getSupabase()
     .from('escalation_events')
     .insert({

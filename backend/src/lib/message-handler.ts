@@ -13,6 +13,7 @@ import {
   isLidFormat,
   markConversationNeedsReviewLid,
   upsertCustomerChatId,
+  detectMedicalConcern,
   isGroupChat,
 } from './db';
 import { generateReply } from './llm';
@@ -275,6 +276,33 @@ async function handleIncomingMessageInner(
     // here is non-fatal.
     if (isLidFormat(opts.from)) {
       await markConversationNeedsReviewLid(conversationId, opts.from);
+    }
+
+    // Step 1.5b: medical-concern detection — keyword/pattern check
+    // that runs INDEPENDENTLY of the LLM. We don't trust the LLM to
+    // reliably flag health-adjacent questions (it can bucket medical
+    // intent under 'other' with high confidence). Whenever the
+    // customer's text contains a clear symptom/safety phrase — allergic
+    // reaction, pain/injury, pregnancy+service, skin/scalp/rash/
+    // infection mentions, "is X safe for Y" — we create an escalation
+    // row with reason='medical_concern' regardless of what the LLM
+    // ends up returning. The bot's reply text still comes from the LLM
+    // (which is told via the prompt to decline medical advice), but
+    // the owner is now guaranteed to see the flag.
+    //
+    // recordEscalation() dedupes on (conversation_id, reason, resolved=false)
+    // so repeated mentions across turns update one row instead of
+    // creating a stream of duplicates. The customer's exact text is
+    // stored in ai_draft_response so the owner can see what triggered
+    // the alert when triaging.
+    //
+    // Best-effort — failure here is non-fatal, logged inside recordEscalation.
+    if (detectMedicalConcern(text)) {
+      await recordEscalation(conversationId, 'medical_concern', text);
+      requestLog.info(
+        { conversationId, textPreview: text.slice(0, 80) },
+        'escalation recorded: medical_concern'
+      );
     }
 
     // Step 1.6: persist the raw WhatsApp identifier (wa_chat_id) so

@@ -500,7 +500,7 @@ router.get(
     const [escRes, takeoverRes] = await Promise.all([
       supabase
         .from('escalation_events')
-        .select('id, conversation_id, created_at, conversations!inner(business_id)')
+        .select('id, conversation_id, created_at, reason, conversations!inner(business_id)')
         .eq('resolved', false)
         .eq('conversations.business_id', businessId),
       supabase
@@ -514,11 +514,17 @@ router.get(
     // source as empty rather than failing the whole endpoint — the
     // Escalations tab is decoration on top of the reply path.
     // Also capture the latest (most-recently-created) escalation id
-    // per conversation so the Mark Resolved button has a target.
-    // Since we only fetched unresolved rows above, "latest" is just
-    // the most-recently-created one per conversation in this set.
+    // + reason per conversation so the Mark Resolved button has a
+    // target AND the UI can show the right badge ("Medical concern"
+    // / "Complaint" / "Wants human" instead of just "Booking Request"
+    // from the LLM's inferred intent). Since we only fetched
+    // unresolved rows above, "latest" is just the most-recently-
+    // created one per conversation in this set.
     const idSet = new Set<string>();
-    const latestEscByConv = new Map<string, { id: string; created_at: string }>();
+    const latestEscByConv = new Map<
+      string,
+      { id: string; created_at: string; reason: string | null }
+    >();
     if (!escRes.error) {
       for (const e of escRes.data || []) {
         if (!e.conversation_id) continue;
@@ -527,10 +533,15 @@ router.get(
         // grab the id off whatever field has it.
         const escId = (e as unknown as { id?: string }).id;
         const created = (e as unknown as { created_at?: string }).created_at;
+        const reason = (e as unknown as { reason?: string }).reason ?? null;
         if (!escId || !created) continue;
         const existing = latestEscByConv.get(e.conversation_id);
         if (!existing || created > existing.created_at) {
-          latestEscByConv.set(e.conversation_id, { id: escId, created_at: created });
+          latestEscByConv.set(e.conversation_id, {
+            id: escId,
+            created_at: created,
+            reason,
+          });
         }
       }
     } else {
@@ -614,13 +625,22 @@ router.get(
       // Supabase joins can resolve as object OR as a one-element array.
       const custRecord = Array.isArray(c.customer) ? c.customer[0] : c.customer;
       const custId = custRecord?.id;
+      const esc = latestEscByConv.get(c.id);
       return {
         ...c,
         next_appointment: custId ? nextByCustomer.get(custId) || null : null,
         // Surface the latest unresolved escalation id so the
         // frontend's "Mark Resolved" button has a target. null for
         // conversations in the queue purely via human_takeover.
-        latest_escalation_id: latestEscByConv.get(c.id)?.id ?? null,
+        latest_escalation_id: esc?.id ?? null,
+        // Surface the latest escalation REASON so the frontend can
+        // render the right badge label ("Medical concern" / "Complaint"
+        // / "Wants human") instead of relying on the LLM's
+        // conversation_state.current_intent, which is usually 'book'
+        // and would always render as "Booking Request" — wrong for
+        // safety/compliance escalations. null for human_takeover-only
+        // conversations.
+        latest_escalation_reason: esc?.reason ?? null,
       };
     });
 
@@ -1668,6 +1688,229 @@ router.put(
       .single();
     if (error) return res.status(500).json({ error: error.message });
     return res.json(data?.ai_rules || payload);
+  }
+);
+
+// ---------------------------------------------------------------------------
+// 15. GET /api/business/:businessId/hours
+// 16. PUT /api/business/:businessId/hours
+//
+// Owner-editable weekly schedule. The 7 rows live in business_hours with
+// a UNIQUE(business_id, day_of_week) constraint, so PUT uses an
+// UPSERT-per-row to handle "owner changed Monday but kept Tuesday" — no
+// DELETE-then-INSERT, no race window where the table is empty.
+//
+// Day codes match the existing seed convention:
+//   'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun'
+// (Short codes — see 08_fabs_salon_seed.sql and db.ts:842.)
+//
+// Buffer between appointments is currently UI-only (no DB column).
+// If we ever persist it, add a buffer_minutes integer to businesses.
+// ---------------------------------------------------------------------------
+
+const VALID_DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const;
+
+router.get(
+  '/business/:businessId/hours',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase
+      .from('business_hours')
+      .select('day_of_week, is_open, open_time, close_time')
+      .eq('business_id', businessId)
+      .order('day_of_week');
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ hours: data || [] });
+  }
+);
+
+router.put(
+  '/business/:businessId/hours',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const { hours } = (req.body || {}) as {
+      hours?: Array<{
+        day_of_week: string;
+        is_open: boolean;
+        open_time: string | null;
+        close_time: string | null;
+      }>;
+    };
+
+    if (!Array.isArray(hours) || hours.length !== 7) {
+      return res.status(400).json({
+        error: 'hours must be an array of exactly 7 rows (one per day_of_week)',
+      });
+    }
+
+    for (const h of hours) {
+      if (!VALID_DAYS.includes(h.day_of_week as typeof VALID_DAYS[number])) {
+        return res.status(400).json({
+          error: `Invalid day_of_week: ${h.day_of_week}. Must be one of: ${VALID_DAYS.join(', ')}`,
+        });
+      }
+      if (h.is_open) {
+        if (!h.open_time || !h.close_time) {
+          return res.status(400).json({
+            error: `When is_open=true, open_time and close_time are required (day: ${h.day_of_week})`,
+          });
+        }
+        if (
+          !/^\d{2}:\d{2}(:\d{2})?$/.test(h.open_time) ||
+          !/^\d{2}:\d{2}(:\d{2})?$/.test(h.close_time)
+        ) {
+          return res.status(400).json({
+            error: `Times must be HH:MM or HH:MM:SS (day: ${h.day_of_week})`,
+          });
+        }
+      }
+    }
+
+    const supabase = getSupabase();
+    const rows = hours.map((h) => ({
+      business_id: businessId,
+      day_of_week: h.day_of_week,
+      is_open: h.is_open,
+      open_time: h.is_open ? h.open_time : null,
+      close_time: h.is_open ? h.close_time : null,
+    }));
+
+    const { data, error } = await supabase
+      .from('business_hours')
+      .upsert(rows, { onConflict: 'business_id,day_of_week' })
+      .select('day_of_week, is_open, open_time, close_time');
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ hours: data || [] });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// 17. GET    /api/business/:businessId/holidays
+// 18. POST   /api/business/:businessId/holidays
+// 19. DELETE /api/business/:businessId/holidays/:holidayId
+//
+// Owner-editable closures / blackout dates. The `holidays` table has a
+// `reason` enum (public_holiday / event / maintenance / emergency /
+// other) AND a free-text `note`. The UI captures only the note
+// ("Independence Day", "Eid holiday", etc.), so we always write
+// reason='other' and stash the note in `note`. If the UI later wants
+// to pick a category, just expose it as a dropdown and switch this
+// helper to read both fields.
+//
+// The booking layer (db.ts:isWithinBusinessHours) checks this table
+// and rejects any attempt to book a slot on a holiday date.
+// ---------------------------------------------------------------------------
+
+router.get(
+  '/business/:businessId/holidays',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase
+      .from('holidays')
+      .select('id, date, reason, note, created_at')
+      .eq('business_id', businessId)
+      .order('date', { ascending: true });
+
+    if (error) return res.status(500).json({ error: error.message });
+    // Surface the free-text reason as a top-level `reason` field for
+    // the UI. The DB enum stays 'other' for now (see POST).
+    const holidays = (data || []).map((h) => ({
+      id: h.id,
+      date: h.date,
+      reason: h.note || '',
+      reason_kind: h.reason,
+    }));
+    return res.json({ holidays });
+  }
+);
+
+router.post(
+  '/business/:businessId/holidays',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const { date, reason } = (req.body || {}) as {
+      date?: string;
+      reason?: string;
+    };
+
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'date is required (YYYY-MM-DD)' });
+    }
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({ error: 'reason is required' });
+    }
+
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+      .from('holidays')
+      .insert({
+        business_id: businessId,
+        date,
+        reason: 'other',
+        note: reason.trim(),
+      })
+      .select('id, date, reason, note')
+      .single();
+
+    if (error) {
+      // 23505 = unique_violation on (business_id, date) — owner is
+      // re-adding a closure for the same date.
+      if (error.code === '23505') {
+        return res.status(409).json({
+          error: `A closure already exists for ${date}`,
+        });
+      }
+      return res.status(500).json({ error: error.message });
+    }
+    return res.status(201).json({
+      holiday: {
+        id: data.id,
+        date: data.date,
+        reason: data.note || '',
+        reason_kind: data.reason,
+      },
+    });
+  }
+);
+
+router.delete(
+  '/business/:businessId/holidays/:holidayId',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId, holidayId } = req.params;
+    const supabase = getSupabase();
+
+    // Confirm ownership before delete (don't leak existence).
+    const { data: existing } = await supabase
+      .from('holidays')
+      .select('business_id')
+      .eq('id', holidayId)
+      .maybeSingle();
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Holiday not found' });
+    }
+    if (existing.business_id !== businessId) {
+      return res.status(404).json({ error: 'Holiday not found' });
+    }
+
+    const { error } = await supabase
+      .from('holidays')
+      .delete()
+      .eq('id', holidayId);
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ id: holidayId });
   }
 );
 

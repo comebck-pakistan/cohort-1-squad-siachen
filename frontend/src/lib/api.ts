@@ -761,6 +761,91 @@ export const api = {
       () => body,
       { method: "PUT", body: JSON.stringify(body) },
     ),
+
+  // ---- Wave 3 — working hours CRUD ---------------------------------------
+
+  /**
+   * Weekly schedule for a salon. The 7 rows from business_hours
+   * (day_of_week: 'mon'..'sun'), used to populate the Operating Hours
+   * tab on first render. Owner edits accumulate in local state and are
+   * persisted via saveBusinessHours() when "Save Changes" is clicked.
+   */
+  businessHours: (businessId: string) =>
+    withMock(`/api/business/${businessId}/hours`, () => ({
+      hours: [] as Array<{
+        day_of_week: string;
+        is_open: boolean;
+        open_time: string | null;
+        close_time: string | null;
+      }>,
+    })),
+
+  /**
+   * Persist all 7 weekly hours rows in one PUT. Backend uses
+   * onConflict='business_id,day_of_week' so this is a true upsert —
+   * no row is dropped, no race window.
+   */
+  saveBusinessHours: (
+    businessId: string,
+    hours: Array<{
+      day_of_week: string;
+      is_open: boolean;
+      open_time: string | null;
+      close_time: string | null;
+    }>,
+  ) =>
+    withMock<{ hours: typeof hours }>(
+      `/api/business/${businessId}/hours`,
+      () => ({ hours }),
+      { method: "PUT", body: JSON.stringify({ hours }) },
+    ),
+
+  // ---- Wave 3 — holidays / closures CRUD ---------------------------------
+
+  /**
+   * Closure dates the salon owner has flagged (Eid, Independence Day,
+   * maintenance days, etc.). The bot's booking layer rejects any
+   * attempt to book a slot on these dates — see db.ts:isWithinBusinessHours.
+   */
+  holidays: (businessId: string) =>
+    withMock(`/api/business/${businessId}/holidays`, () => ({
+      holidays: [] as Array<{
+        id: string;
+        date: string;
+        reason: string;
+        reason_kind: string;
+      }>,
+    })),
+
+  /** Add a single closure date. UI supplies free-text `reason`; the
+   *  backend stores it in the `note` column and writes `reason='other'`
+   *  to the enum. */
+  addHoliday: (
+    businessId: string,
+    body: { date: string; reason: string },
+  ) =>
+    withMock<{
+      holiday: { id: string; date: string; reason: string; reason_kind: string };
+    }>(
+      `/api/business/${businessId}/holidays`,
+      () => ({
+        holiday: {
+          id: crypto.randomUUID(),
+          date: body.date,
+          reason: body.reason,
+          reason_kind: "other",
+        },
+      }),
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  /** Delete a single closure date by id. */
+  deleteHoliday: (businessId: string, holidayId: string) =>
+    withMock<{ id: string }>(
+      `/api/business/${businessId}/holidays/${holidayId}`,
+      () => ({ id: holidayId }),
+      { method: "DELETE" },
+    ),
 };
 
 export const qk = {
@@ -784,6 +869,8 @@ export const qk = {
   dashboardStats: (id: string) => ["dashboard-stats", id] as const,
   escalations: (id: string) => ["escalations", id] as const,
   aiRules: (id: string) => ["ai-rules", id] as const,
+  businessHours: (id: string) => ["business-hours", id] as const,
+  holidays: (id: string) => ["holidays", id] as const,
   businessToday: (id: string) => ["bookings", "today", id] as const,
   businessBookings: (id: string, date: string) =>
     ["bookings", "date", id, date] as const,
