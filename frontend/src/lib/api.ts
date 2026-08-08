@@ -470,6 +470,53 @@ export const api = {
   onboardingPageUrl: (businessId: string) =>
     `${BASE_URL}/onboarding/${businessId}`,
 
+  // ---- Wave 6 — free-trial signup ----------------------------------------
+
+  /**
+   * One-shot signup for the /onboarding wizard. Backend creates the Supabase
+   * auth user, profile (via trigger), businesses row, and N service rows in
+   * a single POST. Returns `{ businessId, email }` on 201.
+   *
+   * Errors surfaced to caller:
+   *   400 — validation (missing field, weak password, etc.)
+   *   409 — email already registered (`code: "EMAIL_TAKEN"`)
+   *   500 — backend failure (auth user was compensated via deleteUser)
+   *
+   * The wizard does NOT auto-login after this call — it navigates to
+   * `/login?from=signup` so the owner signs in with the password they
+   * just set (more explicit, matches existing /login UX).
+   *
+   * The withMock fallback returns a fake UUID so the dev preview keeps
+   * working without a backend. In a real backend run, errors here are
+   * logged via `withMock`'s `console.error` and never silently swallowed.
+   */
+  freeTrialSignup: (payload: {
+    salonName: string;
+    salonType:
+      | "Hair Salon"
+      | "Nail Bar"
+      | "MedSpa"
+      | "Barbershop"
+      | "Lash & Brow Studio";
+    city: string;
+    email: string;
+    password: string;
+    services: Array<{
+      name: string;
+      duration_minutes: number;
+      price?: number;
+      category?: string;
+    }>;
+  }) =>
+    withMock<{ businessId: string; email: string }>(
+      "/api/onboarding/free-trial-signup",
+      () => ({
+        businessId: `mock-${crypto.randomUUID()}`,
+        email: payload.email,
+      }),
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
+
   // ---- Phase 1 dashboard wiring (round-trip data) -----------------------
 
   staff: (businessId: string) =>
