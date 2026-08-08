@@ -501,6 +501,10 @@ export const api = {
     city: string;
     email: string;
     password: string;
+    /** E.164-ish digits of the salon's WhatsApp line (e.g. "923001234567").
+     *  Sent through to businesses.whatsapp_number so the dashboard can show
+     *  it without a second round-trip. */
+    whatsappNumber: string;
     services: Array<{
       name: string;
       duration_minutes: number;
@@ -641,6 +645,76 @@ export const api = {
     withMock<{ id: string; agent_active: boolean }>(
       `/api/business/${businessId}/agent-active`,
       () => ({ id: businessId, agent_active: true }),
+    ),
+
+  // ---- Wave 7 — trial status (dashboard banner + agent-action gates) ------
+
+  /**
+   * Wave 7 — fetch the current trial status for the owner's salon. Used
+   * by TenantShell (banner), AgentToggle (disable when expired), and
+   * the owner-reply Send button (disable when expired).
+   *
+   * React Query handles dedup — every component that needs this fetches
+   * with the same query key, and only one network request fires.
+   */
+  myTrialStatus: (businessId: string) =>
+    withMock<{
+      businessId: string;
+      trial_status: "active" | "expiring_soon" | "expired" | "converted";
+      trial_started_at: string | null;
+      trial_ends_at: string | null;
+      days_remaining: number | null;
+      is_expired: boolean;
+    }>(
+      `/api/business/${businessId}/trial`,
+      () => ({
+        businessId,
+        trial_status: "active" as const,
+        trial_started_at: null,
+        trial_ends_at: null,
+        days_remaining: null,
+        is_expired: false,
+      }),
+    ),
+
+  // ---- Wave 7 — superadmin trial override actions ------------------------
+
+  /**
+   * Extend a salon's trial by `days` (1-365). Resets trial_status='active'
+   * and pushes trial_ends_at forward. Used by the SalonsTab "Extend +7 days"
+   * button for early-conversion / hand-holding outreach.
+   */
+  extendTrial: (salonId: string, days: number) =>
+    withMock<{
+      ok: boolean;
+      business_id?: string;
+      trial_status?: string;
+      trial_ends_at?: string;
+    }>(
+      `/api/salons/${salonId}/trial/extend`,
+      () => ({
+        ok: true,
+        business_id: salonId,
+        trial_status: "active",
+        trial_ends_at: new Date(Date.now() + days * 86400_000).toISOString(),
+      }),
+      { method: "PATCH", body: JSON.stringify({ days }) },
+    ),
+
+  /**
+   * Mark a salon's trial as 'converted' (paid). After this, the bot's
+   * short-circuit ignores the trial clock and resumes normal replies.
+   */
+  convertTrial: (salonId: string) =>
+    withMock<{
+      ok: boolean;
+      business_id?: string;
+      trial_status?: string;
+      trial_ends_at?: string;
+    }>(
+      `/api/salons/${salonId}/trial/convert`,
+      () => ({ ok: true, business_id: salonId, trial_status: "converted" }),
+      { method: "POST" },
     ),
 
   services: (businessId: string) =>
@@ -948,6 +1022,8 @@ export const qk = {
     ["resolved-escalations", id] as const,
   myAgentActive: (id: string) =>
     ["agent-active", id] as const,
+  myTrialStatus: (id: string) =>
+    ["trial-status", id] as const,
   services: (id: string) => ["services", id] as const,
   dashboardStats: (id: string) => ["dashboard-stats", id] as const,
   escalations: (id: string) => ["escalations", id] as const,

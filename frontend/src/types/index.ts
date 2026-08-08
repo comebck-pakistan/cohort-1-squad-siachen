@@ -1,6 +1,15 @@
 export type Tier = "basic" | "pro" | "business";
 export type BillingStatus = "active" | "grace_period" | "suspended";
 
+/**
+ * Wave 7 (Phase 1) — 7-day trial lifecycle.
+ *   active       — trial running, bot replies normally
+ *   expiring_soon — day 5–7, warning WhatsApp already sent to owner
+ *   expired      — day 7+, bot sends fixed fallback, dashboard banner shown
+ *   converted    — paid customer, no trial enforcement
+ */
+export type TrialStatus = "active" | "expiring_soon" | "expired" | "converted";
+
 export interface Business {
   id: string;
   name: string;
@@ -13,6 +22,13 @@ export interface Business {
   mrr_pkr?: number;
   agent_active?: boolean;
   created_at: string;
+  /** Wave 7. Optional — null for pre-Wave-7 salons (grandfathered as
+   *  "no trial"; bot enforcement treats null endsAt as no expiry). */
+  trial_status?: TrialStatus;
+  trial_started_at?: string | null;
+  trial_ends_at?: string | null;
+  /** Server-computed; null for pre-Wave-7 rows (grandfathered). */
+  days_remaining?: number | null;
 }
 
 export interface HandleResult {

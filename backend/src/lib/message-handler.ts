@@ -16,6 +16,7 @@ import {
   detectMedicalConcern,
   isGroupChat,
 } from './db';
+import { isTrialExpired } from './trial';
 import { generateReply } from './llm';
 import { processBookingDecision } from './booking';
 import { childLogger } from './logger';
@@ -248,6 +249,66 @@ async function handleIncomingMessageInner(
       reply: null,
       conversationId: null,
       customerId: null,
+      appointment: 'not_attempted',
+    };
+  }
+
+  // Wave 7 (Phase 2) — trial expiry. If the salon's 7-day free trial has
+  // elapsed (trial_status='expired'), skip the LLM entirely and send a fixed
+  // fallback message to the customer explaining the trial ended. This is
+  // intentionally DIFFERENT from the agent-paused branch above:
+  //
+  //   - reply=null  → silence (paused: owner turned off the bot)
+  //   - reply=text  → fixed fallback (expired: owner should know to upgrade)
+  //
+  // Silence for an expired trial looks like a broken product to the customer
+  // ("did the salon block me?"), so we always reply with a clear, fixed
+  // message that points them at the salon directly. The incoming customer
+  // message is still persisted to the messages table — when the owner
+  // upgrades and resumes the bot, she sees these conversations in her inbox.
+  //
+  // isTrialExpired() is best-effort: on any DB error it returns false so a
+  // transient Supabase hiccup doesn't lock every salon out (fail-open,
+  // matching isAgentActive's semantics above).
+  let trialExpired = false;
+  try {
+    trialExpired = await isTrialExpired(businessId);
+  } catch (e) {
+    requestLog.warn(
+      { err: (e as Error).message },
+      'trial lookup failed — fail-open, treating as active',
+    );
+    trialExpired = false;
+  }
+  if (trialExpired) {
+    let expCustomerId: string | null = null;
+    let expConversationId: string | null = null;
+    try {
+      // Same pattern as the paused branch — persist customer + conversation
+      // so the message lands in the right inbox thread, then write the raw
+      // turn to messages so the owner sees it when she upgrades.
+      expCustomerId = await getOrCreateCustomer(customerPhone);
+      expConversationId = await getOrCreateConversation(businessId, expCustomerId);
+      await saveMessage(expConversationId, 'customer', text);
+      await touchConversation(expConversationId);
+      requestLog.info(
+        { conversationId: expConversationId },
+        'trial_expired_sending_fallback',
+      );
+    } catch (e) {
+      requestLog.warn(
+        { err: (e as Error).message },
+        'trial-expired message persistence failed (non-fatal)',
+      );
+    }
+
+    const fixedReply =
+      "This salon's Recepta free trial has ended. Please contact the salon directly to book an appointment, or message again after they upgrade their plan.";
+
+    return {
+      reply: fixedReply,
+      conversationId: expConversationId,
+      customerId: expCustomerId,
       appointment: 'not_attempted',
     };
   }

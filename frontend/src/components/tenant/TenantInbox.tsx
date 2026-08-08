@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { api, qk } from "@/lib/api";
 import type { NextAppointment } from "@/lib/api";
+import { toast } from "sonner";
 import { useTenantBusinessId } from "@/lib/useTenantBusinessId";
 import {
   Search,
@@ -303,6 +304,20 @@ export function TenantInbox() {
     },
   });
 
+  // Wave 7 — block manual owner-reply sends when trial_status='expired'.
+  // The backend would currently accept the POST (owner-reply isn't
+  // trial-aware), but it's misleading UX to let the owner send replies
+  // through their paired salon WhatsApp while the bot is in fixed-fallback
+  // mode. The banner above the shell explains why. Mutating throws a
+  // synthetic error so onError toasts once and the network isn't called.
+  const trialQ = useQuery({
+    queryKey: businessId ? qk.myTrialStatus(businessId) : ["trial-status", "none"],
+    queryFn: () => api.myTrialStatus(businessId!),
+    enabled: !!businessId,
+    staleTime: 60_000,
+  });
+  const trialExpired = trialQ.data?.is_expired === true;
+
   // Story 18 — full conversation thread. Polls every 15s so an
   // incoming message from a customer shows up without a refresh.
   // MUST be declared after `active` (reads active?.id) to avoid TDZ.
@@ -524,15 +539,26 @@ export function TenantInbox() {
                     <Textarea
                       value={draft}
                       onChange={(e) => setDraft(e.target.value)}
-                      placeholder={isTakenOver ? "Type your reply to the customer…" : "Take over to send a manual reply"}
-                      disabled={!isTakenOver || replyMut.isPending}
+                      placeholder={
+                        trialExpired
+                          ? "Trial ended — upgrade to send manual replies"
+                          : isTakenOver
+                            ? "Type your reply to the customer…"
+                            : "Take over to send a manual reply"
+                      }
+                      disabled={!isTakenOver || replyMut.isPending || trialExpired}
                       className="min-h-11 max-h-32 resize-none bg-white"
                     />
                     <Button
-                      disabled={!isTakenOver || !draft.trim() || replyMut.isPending}
-                      onClick={() =>
-                        replyMut.mutate({ conversationId: active.id, text: draft.trim() })
-                      }
+                      disabled={!isTakenOver || !draft.trim() || replyMut.isPending || trialExpired}
+                      onClick={() => {
+                        if (trialExpired) {
+                          toast.error("Trial ended — upgrade to send manual replies.");
+                          return;
+                        }
+                        replyMut.mutate({ conversationId: active.id, text: draft.trim() });
+                      }}
+                      title={trialExpired ? "Trial ended — upgrade to continue" : undefined}
                       className="bg-primary hover:bg-primary/90"
                     >
                       <Send className="size-4" />

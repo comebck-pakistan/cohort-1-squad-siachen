@@ -50,6 +50,7 @@ interface SignupBody {
   city?: unknown;
   email?: unknown;
   password?: unknown;
+  whatsappNumber?: unknown;
   services?: unknown;
 }
 
@@ -80,6 +81,7 @@ interface ValidationOk {
     city: string;
     email: string;
     password: string;
+    whatsappNumber: string;
     services: ServiceInput[];
   };
 }
@@ -94,6 +96,11 @@ function validate(body: SignupBody): ValidationOk | ValidationErr {
   const city = typeof body.city === 'string' ? body.city.trim() : '';
   const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
   const password = typeof body.password === 'string' ? body.password : '';
+  // Frontend strips formatting chars before sending. We defensively strip
+  // again here so a direct curl/Postman caller can't sneak spaces in.
+  const whatsappNumberRaw =
+    typeof body.whatsappNumber === 'string' ? body.whatsappNumber : '';
+  const whatsappNumber = whatsappNumberRaw.replace(/[\s\-()+]/g, '').replace(/^0+/, '');
   const servicesRaw = Array.isArray(body.services) ? body.services : [];
 
   if (salonName.length < 2) {
@@ -114,6 +121,15 @@ function validate(body: SignupBody): ValidationOk | ValidationErr {
   }
   if (password.length < 8) {
     return { ok: false, message: 'password must be at least 8 characters' };
+  }
+  // 10-15 digits covers PTCL (10), PK mobile (12 with country code) and
+  // the international ceiling. Stored as plain digits to match the rest of
+  // the codebase (e.g. businesses.whatsapp_number).
+  if (!/^\d{10,15}$/.test(whatsappNumber)) {
+    return {
+      ok: false,
+      message: 'whatsappNumber must be 10-15 digits (with country code, no + or spaces)',
+    };
   }
   if (servicesRaw.length < 1) {
     return { ok: false, message: 'at least one service is required' };
@@ -158,6 +174,7 @@ function validate(body: SignupBody): ValidationOk | ValidationErr {
       city,
       email,
       password,
+      whatsappNumber,
       services,
     },
   };
@@ -191,7 +208,7 @@ router.post('/onboarding/free-trial-signup', async (req: Request, res: Response)
   if (!result.ok) {
     return res.status(400).json({ code: 'VALIDATION', message: result.message });
   }
-  const { salonName, salonTypeCanonical, city, email, password, services } = result.data;
+  const { salonName, salonTypeCanonical, city, email, password, whatsappNumber, services } = result.data;
 
   const supabase = getSupabase();
 
@@ -260,19 +277,28 @@ router.post('/onboarding/free-trial-signup', async (req: Request, res: Response)
   }
 
   // ---- Step 3: create the businesses row ---------------------------------
+  // Wave 7: every new salon starts a 7-day free trial. trial_started_at +
+  // trial_ends_at are explicit timestamps (not computed-on-read) so the cron
+  // job in jobs/trial-expiry.ts can scan them with a simple index lookup.
+  // trial_status starts at 'active' and is transitioned by the cron job.
+  const trialStartedAt = new Date();
+  const trialEndsAt = new Date(trialStartedAt.getTime() + 7 * 24 * 60 * 60 * 1000);
+
   const { data: biz, error: bizErr } = await supabase
     .from('businesses')
     .insert({
       name: salonName,
       business_type: salonTypeCanonical,
       city,
+      whatsapp_number: whatsappNumber,
       owner_id: userId,
-      // Phase 1 starts every trial in 'active' state. Phase 2 will add
-      // trial_ends_at + soft-suspend after expiry.
       billing_state: 'active',
       agent_active: true,
+      trial_started_at: trialStartedAt.toISOString(),
+      trial_ends_at: trialEndsAt.toISOString(),
+      trial_status: 'active',
     })
-    .select('id, name')
+    .select('id, name, whatsapp_number, trial_started_at, trial_ends_at')
     .single();
 
   if (bizErr || !biz) {
@@ -318,7 +344,13 @@ router.post('/onboarding/free-trial-signup', async (req: Request, res: Response)
 
   // ---- Step 5: respond ---------------------------------------------------
   log.info(
-    { userId, businessId, owner_email: email, serviceCount: serviceRows.length },
+    {
+      userId,
+      businessId,
+      owner_email: email,
+      whatsapp_number: whatsappNumber,
+      serviceCount: serviceRows.length,
+    },
     'free-trial signup complete',
   );
   return res.status(201).json({ businessId, email });

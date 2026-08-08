@@ -40,6 +40,8 @@ import {
   updateConversationState,
 } from '../lib/db';
 import { childLogger } from '../lib/logger';
+import { getTrialInfo } from '../lib/trial';
+import { bridgeSend } from '../lib/bridge-send';
 
 const router = Router();
 const auth = [requireAuth] as const;
@@ -1013,68 +1015,33 @@ router.post(
       chatId = '';
     }
 
-    // Proxy the actual send to the bridge. The bridge's
-    // /onboarding/:businessId/send endpoint requires X-Bridge-Token;
-    // we forward it. If BRIDGE_URL is not configured, surface a
-    // clear 503 so the frontend can show "send unavailable".
-    if (!BRIDGE_TOKEN || !BRIDGE_URL) {
-      log.warn(
-        { conversationId, businessId: conv.business_id },
-        'owner-reply: bridge not configured (BRIDGE_URL / BRIDGE_INTERNAL_TOKEN missing)'
+    // Proxy the actual send to the bridge. Wave 7 (Phase 4): extracted
+    // to lib/bridge-send.ts so the trial-notify helper can reuse it.
+    const bridgeResult = await bridgeSend(conv.business_id, chatId, text);
+
+    if (bridgeResult.ok) {
+      log.info(
+        { conversationId, businessId: conv.business_id, to: chatId, textLength: text.length },
+        'owner-reply delivered via bridge',
       );
-      return res.status(503).json({
-        error: 'bridge service not configured',
-        sentToBridge: false,
-        messageId,
-      });
+      return res.json({ ok: true, sentToBridge: true, messageId });
     }
 
-    try {
-      const response = await axios({
-        method: 'post' as Method,
-        url: `${BRIDGE_URL}/onboarding/${conv.business_id}/send`,
-        headers: {
-          'X-Bridge-Token': BRIDGE_TOKEN,
-          'Content-Type': 'application/json',
-        },
-        data: { to: chatId, text },
-        validateStatus: () => true,
-        timeout: 10_000,
-      });
-
-      if (response.status >= 200 && response.status < 300) {
-        log.info(
-          { conversationId, businessId: conv.business_id, to: chatId, textLength: text.length },
-          'owner-reply delivered via bridge'
-        );
-        return res.json({ ok: true, sentToBridge: true, messageId });
-      }
-
-      // Bridge returned non-2xx — surface it to the caller. We treat
-      // 404 (no active session) and 5xx as a real delivery failure.
-      log.error(
-        { conversationId, status: response.status, body: response.data },
-        'owner-reply: bridge send failed'
-      );
-      return res.status(502).json({
-        error: `bridge send failed: ${response.status}`,
-        bridgeStatus: response.status,
-        bridgeBody: response.data,
-        sentToBridge: false,
-        messageId,
-      });
-    } catch (e) {
-      const err = e as AxiosError;
-      log.error(
-        { conversationId, err: err.message },
-        'owner-reply: bridge unreachable'
-      );
-      return res.status(502).json({
-        error: `bridge unreachable: ${err.message}`,
-        sentToBridge: false,
-        messageId,
-      });
-    }
+    // Map the bridgeResult to a meaningful HTTP status for the frontend.
+    // 'not configured' is a 503 (deployment gap, owner can't fix). Other
+    // failures are 502 (upstream unreachable / returned non-2xx).
+    const isNotConfigured = bridgeResult.error === 'bridge service not configured';
+    log.error(
+      { conversationId, err: bridgeResult.error, bridgeStatus: bridgeResult.bridgeStatus },
+      'owner-reply: bridge send failed',
+    );
+    return res.status(isNotConfigured ? 503 : 502).json({
+      error: bridgeResult.error,
+      bridgeStatus: bridgeResult.bridgeStatus,
+      bridgeBody: bridgeResult.bridgeBody,
+      sentToBridge: false,
+      messageId,
+    });
   }
 );
 
@@ -1220,6 +1187,33 @@ router.get(
     if (error) return res.status(500).json({ error: error.message });
     if (!data) return res.status(404).json({ error: 'Business not found' });
     return res.json({ id: data.id, agent_active: data.agent_active !== false });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Wave 7 (Phase 3) — trial status for the dashboard banner + agent-action
+// gates. Returns the full TrialInfo so the frontend can render "X days
+// remaining" / "Expired" / "Paid" / etc. from a single fetch.
+//
+// All computation (days_remaining, isExpired) is done server-side in
+// lib/trial.ts so the frontend never has to duplicate the timezone math.
+// Reuses the same trial info helper the message-handler uses for the bot
+// short-circuit — single source of truth.
+// ---------------------------------------------------------------------------
+router.get(
+  '/business/:businessId/trial',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const info = await getTrialInfo(businessId);
+    return res.json({
+      businessId,
+      trial_status: info.status,
+      trial_started_at: info.startedAt,
+      trial_ends_at: info.endsAt,
+      days_remaining: info.daysRemaining,
+      is_expired: info.isExpired,
+    });
   }
 );
 

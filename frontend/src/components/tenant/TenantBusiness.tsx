@@ -1183,9 +1183,31 @@ function AgentToggle({ businessId }: { businessId: string }) {
     staleTime: 30_000,
   });
 
+  // Wave 7 — when trial_status='expired', the bot can't actually reply
+  // with intelligent messages (message-handler sends a fixed fallback).
+  // Disable the pause toggle so the owner doesn't waste a click; the
+  // banner above the shell already explains why. PATCH is also rejected
+  // client-side — the flip mutation is gated on `!trialExpired` below.
+  const trialQ = useQuery({
+    queryKey: qk.myTrialStatus(businessId),
+    queryFn: () => api.myTrialStatus(businessId),
+    enabled: !!businessId,
+    staleTime: 60_000,
+  });
+  const trialExpired = trialQ.data?.is_expired === true;
+
   const flip = useMutation({
     mutationFn: (active: boolean) => api.setMyAgentActive(businessId, active),
     onMutate: async (active) => {
+      // Block the flip entirely when trial is expired — the bot is already
+      // in fixed-fallback mode regardless of agent_active, so toggling
+      // would mislead the owner about whether replies are happening.
+      if (trialExpired) {
+        toast.error("Trial ended — upgrade to resume the AI receptionist.");
+        // Throw a non-network error so the mutation fails cleanly without
+        // firing the API. onError catches it and toasts.
+        throw new Error("trial_expired");
+      }
       // Optimistic update — the toggle feels instant.
       await qc.cancelQueries({ queryKey: qk.myAgentActive(businessId) });
       const prev = qc.getQueryData<{ id: string; agent_active: boolean }>(
@@ -1201,6 +1223,9 @@ function AgentToggle({ businessId }: { businessId: string }) {
       if (ctx?.prev) {
         qc.setQueryData(qk.myAgentActive(businessId), ctx.prev);
       }
+      // Suppress the noisy network-error toast for the synthetic
+      // trial-expired throw above.
+      if (e.message === "trial_expired") return;
       toast.error(`Could not flip AI status: ${e.message}`);
     },
     onSuccess: (_data, active) => {
@@ -1214,15 +1239,17 @@ function AgentToggle({ businessId }: { businessId: string }) {
   const active = state.data?.agent_active ?? true;
 
   return (
-    <Card className="border shadow-none bg-white">
+    <Card className={`border shadow-none bg-white ${trialExpired ? "opacity-70" : ""}`}>
       <CardContent className="p-4">
         <div className="flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div
               className={`size-9 rounded-md grid place-items-center ${
-                active
-                  ? "bg-success-soft text-[oklch(0.35_0.12_145)]"
-                  : "bg-warning-soft text-[oklch(0.35_0.1_70)]"
+                trialExpired
+                  ? "bg-warning-soft text-[oklch(0.45_0.14_70)]"
+                  : active
+                    ? "bg-success-soft text-[oklch(0.35_0.12_145)]"
+                    : "bg-warning-soft text-[oklch(0.35_0.1_70)]"
               }`}
             >
               <Bot className="size-5" />
@@ -1230,20 +1257,32 @@ function AgentToggle({ businessId }: { businessId: string }) {
             <div>
               <div className="font-medium">AI Receptionist</div>
               <div className="text-xs text-muted-foreground">
-                {state.isLoading
-                  ? "Checking status…"
-                  : active
-                    ? "Bot is responding to new WhatsApp messages"
-                    : "Paused — bot is not replying. Customer messages are still logged."}
+                {trialExpired
+                  ? "Trial ended — bot is sending a fixed reply. Upgrade to resume."
+                  : state.isLoading
+                    ? "Checking status…"
+                    : active
+                      ? "Bot is responding to new WhatsApp messages"
+                      : "Paused — bot is not replying. Customer messages are still logged."}
               </div>
             </div>
           </div>
           <Switch
             checked={active}
-            disabled={state.isLoading || flip.isPending}
+            disabled={state.isLoading || flip.isPending || trialExpired}
             onCheckedChange={(checked) => flip.mutate(checked)}
+            title={trialExpired ? "Trial ended — upgrade to continue" : undefined}
           />
         </div>
+        {trialExpired && (
+          <div className="mt-3 flex items-start gap-2 rounded-md border border-warning bg-warning-soft/60 p-3 text-sm">
+            <AlertTriangle className="size-4 text-[oklch(0.45_0.14_70)] mt-0.5 shrink-0" />
+            <div>
+              Your free trial has ended. The toggle is locked until you upgrade.
+              Customer messages are still saved — open the <strong>Inbox</strong> to read them.
+            </div>
+          </div>
+        )}
         {!active && (
           <div className="mt-3 flex items-start gap-2 rounded-md border border-warning bg-warning-soft/60 p-3 text-sm">
             <AlertTriangle className="size-4 text-[oklch(0.45_0.14_70)] mt-0.5 shrink-0" />

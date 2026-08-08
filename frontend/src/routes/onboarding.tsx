@@ -11,6 +11,7 @@ import {
   Upload,
   Lock,
   Mail,
+  Phone,
   PartyPopper,
 } from "lucide-react";
 
@@ -120,6 +121,11 @@ function OnboardingPage() {
   const [salonType, setSalonType] = useState<SalonType | "">("");
   const [city, setCity] = useState("");
   const [ownerEmail, setOwnerEmail] = useState("");
+  // Salon WhatsApp number — the line customers will message. Stored as
+  // E.164-ish digits (e.g. "923001234567") so it matches the rest of the
+  // codebase. The wizard lets the owner paste "+92 300 1234567" and we
+  // strip the formatting before sending.
+  const [whatsappNumber, setWhatsappNumber] = useState("");
 
   // Step 2 — Services
   const [services, setServices] = useState<ServiceDraft[]>([emptyService()]);
@@ -130,13 +136,23 @@ function OnboardingPage() {
 
   // ---- Validation helpers --------------------------------------------------
 
+  // Strip spaces, dashes, parens, plus signs. Leaves only digits. Then
+  // require 10-15 digits — covers PTCL (10), mobiles (12 with country code),
+  // and the international ceiling.
+  const normalizeWhatsApp = (raw: string): string =>
+    raw.replace(/[\s\-()+]/g, "").replace(/^0+/, "");
+
   const step1Valid = useMemo(
     () =>
       salonName.trim().length >= 2 &&
       salonType !== "" &&
       city !== "" &&
-      EMAIL_RE.test(ownerEmail.trim()),
-    [salonName, salonType, city, ownerEmail],
+      EMAIL_RE.test(ownerEmail.trim()) &&
+      (() => {
+        const digits = normalizeWhatsApp(whatsappNumber);
+        return digits.length >= 10 && digits.length <= 15 && /^\d+$/.test(digits);
+      })(),
+    [salonName, salonType, city, ownerEmail, whatsappNumber],
   );
 
   const step2Valid = useMemo(() => {
@@ -165,6 +181,7 @@ function OnboardingPage() {
         city,
         email: ownerEmail.trim(),
         password,
+        whatsappNumber: normalizeWhatsApp(whatsappNumber),
         services: services.map((s) => ({
           name: s.name.trim(),
           duration_minutes: Number(s.duration_minutes),
@@ -354,6 +371,27 @@ function OnboardingPage() {
                       onChange={(e) => setOwnerEmail(e.target.value)}
                     />
                   </div>
+                </div>
+
+                <div className="md:col-span-2">
+                  <Label htmlFor="whatsapp">Salon WhatsApp Number</Label>
+                  <div className="relative mt-1.5">
+                    <Phone className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      id="whatsapp"
+                      type="tel"
+                      inputMode="numeric"
+                      autoComplete="tel"
+                      placeholder="+92 300 1234567"
+                      className="pl-10 h-11"
+                      value={whatsappNumber}
+                      onChange={(e) => setWhatsappNumber(e.target.value)}
+                    />
+                  </div>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    The WhatsApp line customers will message. Pair it in the
+                    next step.
+                  </p>
                 </div>
 
                 <div className="md:col-span-2">
