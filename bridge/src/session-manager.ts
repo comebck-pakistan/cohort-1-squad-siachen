@@ -7,6 +7,7 @@ import {
   ClientStatus,
   IncomingMessageEvent,
   StatusChangeEvent,
+  PairingMethod,
 } from './client';
 
 // ---------------------------------------------------------------------------
@@ -265,6 +266,44 @@ export class SessionManager extends EventEmitter {
   getLatestQR(businessId: string): string | null {
     const client = this.clients.get(businessId);
     return client ? client.qr : null;
+  }
+
+  /**
+   * Latest 8-char phone-pairing code, or null if the salon hasn't
+   * switched to phone pairing yet (or no client is registered).
+   * Format from the library is "ABCDEFGH" — qr-server formats as
+   * XXXX-XXXX on the way out.
+   */
+  getPairingCode(businessId: string): string | null {
+    const client = this.clients.get(businessId);
+    return client ? client.pairingCode : null;
+  }
+
+  /**
+   * Which pairing method is active for this salon — 'qr' (default)
+   * or 'phone' (after the owner invoked POST /pair-with-phone).
+   * Returns null if no client is registered.
+   */
+  getPairingMethod(businessId: string): PairingMethod | null {
+    const client = this.clients.get(businessId);
+    return client ? client.method : null;
+  }
+
+  /**
+   * Switch an already-initialized client into phone-pairing mode.
+   * Throws if no client exists or the client isn't initialized —
+   * both indicate the caller routed the request before the chromium
+   * was ready. The qr-server maps the error to 400/409.
+   */
+  async requestPhonePairing(
+    businessId: string,
+    phoneNumber: string
+  ): Promise<string> {
+    const client = this.clients.get(businessId);
+    if (!client) {
+      throw new Error(`No client registered for business ${businessId}`);
+    }
+    return client.requestPhonePairing(phoneNumber);
   }
 
   /**

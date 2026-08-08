@@ -65,10 +65,29 @@ export interface SafetyRules {
 
 export interface OnboardingStatus {
   businessId: string;
-  status: "qr_ready" | "ready" | "initializing" | "not_found";
+  status:
+    | "initializing"
+    | "qr_pending"
+    | "qr_ready"
+    | "code_pending"
+    | "authenticated"
+    | "ready"
+    | "disconnected"
+    | "expired"
+    | "not_found";
   hasQR: boolean;
-  /** Raw QR string from whatsapp-web bridge. Encode with qrcode.react. */
+  /** Raw QR string from whatsapp-web bridge. Encode with qrcode.react.
+   *  Always null when pairing_method === 'phone' — phone mode clears
+   *  the QR holder on the bridge side. */
   qr: string | null;
+  /** Which pairing handshake the salon owner picked. 'qr' (default,
+   *  scans an image) or 'phone' (types an 8-char code under
+   *  Settings → Linked Devices). null when no client is registered. */
+  pairing_method: "qr" | "phone" | null;
+  /** Raw 8-char pairing code from the library, no dashes
+   *  (e.g. "ABCDEFGH"). Modal formats as XXXX-XXXX for display.
+   *  Only populated when status === 'code_pending'. */
+  pairing_code: string | null;
 }
 
 export interface CreateSalonInput {

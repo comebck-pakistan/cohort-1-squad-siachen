@@ -78,6 +78,14 @@ router.post('/onboarding/:businessId/register', (req, res) =>
   forward(req, res, 'post', `/onboarding/${req.params.businessId}/register`)
 );
 
+// POST /onboarding/:businessId/pair-with-phone — switch an already-
+// registered client into phone-pairing mode. Body { phoneNumber } is
+// forwarded verbatim. The bridge owns the actual library call; this
+// proxy just keeps the frontend talking only to the core API.
+router.post('/onboarding/:businessId/pair-with-phone', (req, res) =>
+  forward(req, res, 'post', `/onboarding/${req.params.businessId}/pair-with-phone`)
+);
+
 // DELETE /onboarding/:businessId/session — tear down the chromium session.
 router.delete('/onboarding/:businessId/session', (req, res) =>
   forward(req, res, 'delete', `/onboarding/${req.params.businessId}/session`)

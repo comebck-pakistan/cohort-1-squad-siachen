@@ -416,7 +416,43 @@ export const api = {
       status: "qr_ready",
       hasQR: true,
       qr: null,
+      pairing_method: "qr",
+      pairing_code: null,
     })),
+  /**
+   * Switch an already-registered salon into phone-pairing mode.
+   * Returns the first 8-char pairing code the bridge generated. The
+   * library auto-rotates every ~3 min; the modal picks up new codes
+   * from the next /status poll.
+   *
+   * Errors surfaced to caller:
+   *   400 — phoneNumber missing or wrong format
+   *   404 — no client registered (must call /register first)
+   *   409 — chromium still initializing (poll /status, retry)
+   *   500 — library/puppeteer error from the bridge
+   */
+  pairWithPhone: (
+    businessId: string,
+    phoneNumber: string
+  ): Promise<{
+    businessId: string;
+    pairing_method: "phone";
+    pairing_code: string;
+    status: "code_pending";
+  }> =>
+    withMock(
+      `/onboarding/${businessId}/pair-with-phone`,
+      () => ({
+        businessId,
+        pairing_method: "phone" as const,
+        pairing_code: "MOCK1234",
+        status: "code_pending" as const,
+      }),
+      {
+        method: "POST",
+        body: JSON.stringify({ phoneNumber }),
+      }
+    ),
   connectionInfo: (businessId: string) =>
     withMock(`/api/business/${businessId}/connection-info`, () => ({
       businessId,

@@ -43,11 +43,21 @@ const log = childLogger('whatsapp-web.client');
 export type ClientStatus =
   | 'initializing'
   | 'qr_pending'
+  | 'code_pending'
   | 'authenticated'
   | 'ready'
   | 'disconnected'
   | 'expired'
   | 'destroyed';
+
+/**
+ * Which pairing handshake the salon owner chose. Default 'qr' — the
+ * library boots into QR mode unless we explicitly call
+ * client.requestPairingCode() (which flips this to 'phone'). The
+ * qr-server surfaces this on the status response so the frontend
+ * knows whether to render the QR or the XXXX-XXXX code.
+ */
+export type PairingMethod = 'qr' | 'phone';
 
 export interface IncomingMessageEvent {
   businessId: string;
@@ -96,6 +106,20 @@ export class WhatsAppWebClient extends EventEmitter {
 
   private currentStatus: ClientStatus = 'initializing';
   private latestQR: string | null = null;
+  /**
+   * Latest 8-char pairing code from the library's `code` event. Only
+   * populated after requestPhonePairing() has been called and the
+   * library has emitted at least one code. The library auto-rotates
+   * every intervalMs (default 3 min) via an internal timer — we just
+   * hold whatever the most recent value is. Null in QR-only mode.
+   */
+  private latestPairingCode: string | null = null;
+  /**
+   * Which pairing method the salon owner chose. Stays 'qr' (default)
+   * unless requestPhonePairing() flips it to 'phone'. The qr-server
+   * surfaces this so the modal can render the right UI.
+   */
+  private pairingMethod: PairingMethod = 'qr';
   private initialized = false;
   private isDestroying = false;
   private reconnectAttempts = 0;
@@ -247,6 +271,24 @@ export class WhatsAppWebClient extends EventEmitter {
     return this.latestQR;
   }
 
+  /**
+   * Most recent 8-char pairing code from the library, or null if the
+   * salon hasn't started phone-pairing yet. Format from the library
+   * is "ABCDEFGH" (no dashes) — callers should format as XXXX-XXXX
+   * for display.
+   */
+  get pairingCode(): string | null {
+    return this.latestPairingCode;
+  }
+
+  /**
+   * Which pairing method is active for this salon. 'qr' (default)
+   * until requestPhonePairing() flips it to 'phone'.
+   */
+  get method(): PairingMethod {
+    return this.pairingMethod;
+  }
+
   get ready(): boolean {
     return this.currentStatus === 'ready';
   }
@@ -280,6 +322,22 @@ export class WhatsAppWebClient extends EventEmitter {
       log.info(
         { businessId: this.businessId, qrLength: qr.length },
         'qr received; awaiting scan'
+      );
+    });
+
+    // Phone-pairing handshake. The library emits this event when
+    // requestPairingCode() is called (initial code + every intervalMs
+    // rotation, default 3 min). We store the latest and flip status
+    // to code_pending. The QR is no longer the active handshake in
+    // this mode — clear it so the frontend doesn't render a stale QR
+    // alongside the code.
+    this.client.on('code', (code: string) => {
+      this.latestPairingCode = code;
+      this.latestQR = null;
+      this.setStatus('code_pending');
+      log.info(
+        { businessId: this.businessId, codeLength: code.length },
+        'pairing code received; awaiting phone entry'
       );
     });
 
@@ -609,6 +667,91 @@ export class WhatsAppWebClient extends EventEmitter {
     } catch (e) {
       this.initialized = false;
       this.setStatus('expired');
+      throw e;
+    }
+  }
+
+  /**
+   * Switch this client from QR pairing to phone-number pairing.
+   *
+   * whatsapp-web.js exposes requestPairingCode() as a public API
+   * (src/Client.js:514) — designed exactly for the "wait until
+   * chromium is in a known-good state, then trigger pairing" pattern
+   * that the QR handshake completes internally during initialize().
+   *
+   * Workflow:
+   *   1. Caller already called initialize() — chromium boots, qr event
+   *      fires briefly (we ignore it).
+   *   2. Caller invokes requestPhonePairing(phoneNumber) — the
+   *      library's requestPairingCode() waits internally for
+   *      window.AuthStore.PairingCodeLinkUtils (it polls), then
+   *      emits the 'code' event AND returns the first code string.
+   *   3. The 'code' event listener above stores the code and flips
+   *      status to 'code_pending'.
+   *
+   * Phone number format: raw digits, country code, no '+', no spaces.
+   * Mirrors the library's example (96170100100). 8-15 digits per E.164.
+   *
+   * Throws on:
+   *   - invalid phone format (sanity check before library call)
+   *   - client not initialized (must be done first)
+   *   - client destroying (mid-shutdown)
+   *   - library error (puppeteer page evaluate failed)
+   */
+  async requestPhonePairing(phoneNumber: string): Promise<string> {
+    if (this.isDestroying) {
+      throw new Error(
+        'WhatsAppWebClient: cannot request phone pairing while destroying'
+      );
+    }
+    if (!this.initialized) {
+      throw new Error(
+        'WhatsAppWebClient: initialize() must run before requestPhonePairing()'
+      );
+    }
+
+    // Library wants raw digits only — strip +/spaces/dashes defensively.
+    // 8-15 digits matches E.164 spec; international numbers without a
+    // leading '+' is the documented whatsapp-web.js format.
+    const sanitized = (phoneNumber || '').replace(/[^0-9]/g, '');
+    if (sanitized.length < 8 || sanitized.length > 15) {
+      throw new Error(
+        `Invalid phone number: expected 8-15 digits, got ${sanitized.length}`
+      );
+    }
+
+    log.info(
+      { businessId: this.businessId, phoneLength: sanitized.length },
+      'requesting phone pairing code from library'
+    );
+
+    // Flip method BEFORE the await — the status endpoint needs to
+    // report 'phone' the moment the call lands, not after the library
+    // returns (which can take a few seconds on a cold chromium).
+    this.pairingMethod = 'phone';
+
+    try {
+      // requestPairingCode returns the FIRST code; subsequent rotations
+      // come through the 'code' event listener we registered above.
+      const code = await this.client.requestPairingCode(sanitized);
+      // Belt-and-suspenders: the 'code' event will also fire and store
+      // this value, but we set it directly here in case the event races
+      // with the poll cycle (the QRModal polls every 2.5s).
+      this.latestPairingCode = code;
+      this.latestQR = null;
+      this.setStatus('code_pending');
+      log.info(
+        { businessId: this.businessId, codeLength: code.length },
+        'phone pairing code returned from library'
+      );
+      return code;
+    } catch (e) {
+      // Restore qr-only state on failure so the user can fall back.
+      this.pairingMethod = 'qr';
+      log.error(
+        { businessId: this.businessId, err: (e as Error).message },
+        'requestPairingCode failed'
+      );
       throw e;
     }
   }
