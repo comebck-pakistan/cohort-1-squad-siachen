@@ -67,6 +67,42 @@ function classifyIntent(raw: string | null | undefined): Intent {
   return "Other";
 }
 
+/**
+ * Map the raw escalation_events.reason value to a human-readable badge
+ * label. Why we override the LLM-derived intent label: the LLM often
+ * classifies medical/abusive/angry messages as 'book' (highest-priority
+ * action), so the badge would say "Booking Request" even when the
+ * conversation is a safety escalation. The escalation reason is the
+ * authoritative trigger signal, so we surface it.
+ *
+ * Unknown reason values fall back to a human-friendly version of the
+ * raw snake_case string so we never break the UI when a new reason is
+ * added server-side.
+ */
+function reasonLabel(reason: string | null): string | null {
+  if (!reason) return null;
+  switch (reason) {
+    case "customer_complaint":
+      return "Complaint";
+    case "low_confidence":
+      return "Low confidence";
+    case "medical_concern":
+      return "Medical concern";
+    case "needs_review_lid_format":
+      return "Needs review";
+    case "customer_request_human":
+      return "Wants human";
+    case "abusive_language":
+      return "Abusive";
+    default:
+      // snake_case → "Needs review" style
+      return reason
+        .split("_")
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(" ");
+  }
+}
+
 function fmtTimeAgo(iso: string | null | undefined): string {
   if (!iso) return "—";
   const ms = Date.now() - new Date(iso).getTime();
@@ -98,6 +134,12 @@ interface NormalizedConvo {
    *  both sub-tabs so Mark Resolved (Active) and any future
    *  re-escalate (Resolved) can target the right row. */
   latestEscalationId: string | null;
+  /** Latest escalation reason ("medical_concern", "customer_complaint",
+   *  etc.). When set, overrides the LLM-derived intent in the badge —
+   *  critical because the LLM often classifies medical / angry
+   *  messages as 'book' which would render as "Booking Request"
+   *  even when the conversation is a safety escalation. */
+  latestEscalationReason: string | null;
 }
 
 export function TenantInbox() {
@@ -158,6 +200,8 @@ export function TenantInbox() {
           : null,
       latestEscalationId:
         ((c as { latest_escalation_id?: string | null }).latest_escalation_id ?? null),
+      latestEscalationReason:
+        ((c as { latest_escalation_reason?: string | null }).latest_escalation_reason ?? null),
     };
   });
 
@@ -366,8 +410,20 @@ export function TenantInbox() {
                     <div className="text-xs text-muted-foreground font-mono truncate">{c.phone}</div>
                     <div className="mt-1 text-xs text-foreground/80 line-clamp-1">{c.snippet}</div>
                     <div className="mt-2 flex items-center gap-1">
-                      <Badge className={cn("text-[10px] font-medium", intentColor[c.intent])}>
-                        {c.intent}
+                      <Badge
+                        className={cn(
+                          "text-[10px] font-medium",
+                          // Prefer the escalation reason label when
+                          // present — overrides the LLM-derived intent
+                          // which often says "Booking Request" for
+                          // medical/angry messages. The reason is the
+                          // authoritative signal.
+                          reasonLabel(c.latestEscalationReason)
+                            ? "bg-danger-soft text-[oklch(0.4_0.18_27)] border-transparent"
+                            : intentColor[c.intent],
+                        )}
+                      >
+                        {reasonLabel(c.latestEscalationReason) ?? c.intent}
                       </Badge>
                       {subTab === "resolved" && (
                         <Badge className="text-[10px] font-medium bg-success-soft text-[oklch(0.35_0.12_145)] border-transparent">
@@ -516,7 +572,10 @@ export function TenantInbox() {
           <dl className="mt-4 space-y-3 text-sm">
             <Row label="Name" value={active?.name ?? "—"} />
             <Row label="Phone" value={active?.phone ?? "—"} />
-            <Row label="Intent" value={active?.intent ?? "—"} />
+            <Row
+              label="Intent"
+              value={reasonLabel(active?.latestEscalationReason ?? null) ?? active?.intent ?? "—"}
+            />
             <Row
               label="Status"
               value={
