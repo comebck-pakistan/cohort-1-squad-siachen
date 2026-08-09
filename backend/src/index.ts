@@ -18,6 +18,7 @@ import superadminRouter from './routes/superadmin';
 import onboardingRouter from './routes/onboarding';
 import bridgeRouter from './routes/bridge';
 import freeTrialSignupRouter from './routes/free-trial-signup';
+import waitlistRouter from './routes/waitlist';
 import { logger, childLogger } from './lib/logger';
 import { startTrialExpiryJob } from './jobs/trial-expiry';
 import { stopAllJobs } from './lib/scheduler';
@@ -131,6 +132,8 @@ app.use('/api', superadminRouter);
 // discovery and inbound-message delivery.
 app.use('/api', bridgeRouter);
 app.use('/api', freeTrialSignupRouter);
+// Wave 8 — landing-page waitlist capture. Public POST endpoint, no auth.
+app.use('/api', waitlistRouter);
 // Onboarding proxy — /onboarding/:id/* is forwarded to the bridge service
 // (Phase 1). Mounted at root because the path is part of the URL space shared
 // with the bridge's own QR server.

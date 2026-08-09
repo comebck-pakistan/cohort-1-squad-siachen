@@ -16,6 +16,7 @@ import { Route as OnboardingRouteImport } from './routes/onboarding'
 import { Route as SalonPortalRouteImport } from './routes/salon-portal'
 import { Route as SitemapDotxmlRouteImport } from './routes/sitemap[.]xml'
 import { Route as SuperadminRouteImport } from './routes/superadmin'
+import { Route as WaitlistRouteImport } from './routes/waitlist'
 import { Route as SalonPortalIndexRouteImport } from './routes/salon-portal.index'
 import { Route as SalonPortalAiRulesRouteImport } from './routes/salon-portal.ai-rules'
 import { Route as SalonPortalBookingsRouteImport } from './routes/salon-portal.bookings'
@@ -62,6 +63,11 @@ const SitemapDotxmlRoute = SitemapDotxmlRouteImport.update({
 const SuperadminRoute = SuperadminRouteImport.update({
   id: '/superadmin',
   path: '/superadmin',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const WaitlistRoute = WaitlistRouteImport.update({
+  id: '/waitlist',
+  path: '/waitlist',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SalonPortalIndexRoute = SalonPortalIndexRouteImport.update({
@@ -133,6 +139,7 @@ export interface FileRoutesByFullPath {
   '/salon-portal': typeof SalonPortalRouteWithChildren
   '/sitemap.xml': typeof SitemapDotxmlRoute
   '/superadmin': typeof SuperadminRouteWithChildren
+  '/waitlist': typeof WaitlistRoute
   '/salon-portal/ai-rules': typeof SalonPortalAiRulesRoute
   '/salon-portal/bookings': typeof SalonPortalBookingsRoute
   '/salon-portal/business': typeof SalonPortalBusinessRoute
@@ -152,6 +159,7 @@ export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/onboarding': typeof OnboardingRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/waitlist': typeof WaitlistRoute
   '/salon-portal/ai-rules': typeof SalonPortalAiRulesRoute
   '/salon-portal/bookings': typeof SalonPortalBookingsRoute
   '/salon-portal/business': typeof SalonPortalBusinessRoute
@@ -174,6 +182,7 @@ export interface FileRoutesById {
   '/salon-portal': typeof SalonPortalRouteWithChildren
   '/sitemap.xml': typeof SitemapDotxmlRoute
   '/superadmin': typeof SuperadminRouteWithChildren
+  '/waitlist': typeof WaitlistRoute
   '/salon-portal/ai-rules': typeof SalonPortalAiRulesRoute
   '/salon-portal/bookings': typeof SalonPortalBookingsRoute
   '/salon-portal/business': typeof SalonPortalBusinessRoute
@@ -197,6 +206,7 @@ export interface FileRouteTypes {
     | '/salon-portal'
     | '/sitemap.xml'
     | '/superadmin'
+    | '/waitlist'
     | '/salon-portal/ai-rules'
     | '/salon-portal/bookings'
     | '/salon-portal/business'
@@ -216,6 +226,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/onboarding'
     | '/sitemap.xml'
+    | '/waitlist'
     | '/salon-portal/ai-rules'
     | '/salon-portal/bookings'
     | '/salon-portal/business'
@@ -237,6 +248,7 @@ export interface FileRouteTypes {
     | '/salon-portal'
     | '/sitemap.xml'
     | '/superadmin'
+    | '/waitlist'
     | '/salon-portal/ai-rules'
     | '/salon-portal/bookings'
     | '/salon-portal/business'
@@ -259,6 +271,7 @@ export interface RootRouteChildren {
   SalonPortalRoute: typeof SalonPortalRouteWithChildren
   SitemapDotxmlRoute: typeof SitemapDotxmlRoute
   SuperadminRoute: typeof SuperadminRouteWithChildren
+  WaitlistRoute: typeof WaitlistRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -310,6 +323,13 @@ declare module '@tanstack/react-router' {
       path: '/superadmin'
       fullPath: '/superadmin'
       preLoaderRoute: typeof SuperadminRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/waitlist': {
+      id: '/waitlist'
+      path: '/waitlist'
+      fullPath: '/waitlist'
+      preLoaderRoute: typeof WaitlistRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/salon-portal/': {
@@ -451,6 +471,7 @@ const rootRouteChildren: RootRouteChildren = {
   SalonPortalRoute: SalonPortalRouteWithChildren,
   SitemapDotxmlRoute: SitemapDotxmlRoute,
   SuperadminRoute: SuperadminRouteWithChildren,
+  WaitlistRoute: WaitlistRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

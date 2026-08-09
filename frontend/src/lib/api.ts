@@ -521,6 +521,32 @@ export const api = {
       { method: "POST", body: JSON.stringify(payload) },
     ),
 
+  /**
+   * Wave 8 — landing-page waitlist capture. Public POST, no auth, no
+   * withMock fallback for dev because the form should never appear to
+   * "succeed" without the backend. Returns a lead id on 201. The
+   * backend persists to public.waitlist_leads.
+   */
+  waitlistSignup: (payload: {
+    name: string;
+    salonName: string;
+    /** Normalized digits (10-15 chars, no +/spaces) — same shape the
+     *  backend's `validate()` produces from raw input. */
+    phone: string;
+    email: string;
+    salonType?:
+      | "Hair Salon"
+      | "Nail Bar"
+      | "MedSpa"
+      | "Barbershop"
+      | "Lash & Brow Studio";
+  }) =>
+    withMock<{ leadId: string }>(
+      "/api/waitlist",
+      () => ({ leadId: `mock-${crypto.randomUUID()}` }),
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
+
   // ---- Phase 1 dashboard wiring (round-trip data) -----------------------
 
   staff: (businessId: string) =>
@@ -851,11 +877,11 @@ export const api = {
       { method: "PATCH", body: JSON.stringify({ service_ids: serviceIds }) },
     ),
 
-  /** Patch an appointment — confirm/cancel/reschedule. */
+  /** Patch an appointment — confirm/cancel/reschedule/no-show. */
   patchAppointment: (
     appointmentId: string,
     body: {
-      status?: "pending" | "confirmed" | "completed" | "cancelled";
+      status?: "pending" | "confirmed" | "completed" | "cancelled" | "no_show";
       start_time?: string;
       end_time?: string;
     },

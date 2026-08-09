@@ -65,6 +65,10 @@ const statusMeta: Record<
     label: "Session expired — try again",
     className: "bg-danger-soft text-[oklch(0.4_0.18_27)]",
   },
+  destroyed: {
+    label: "Session destroyed — start a new one",
+    className: "bg-danger-soft text-[oklch(0.4_0.18_27)]",
+  },
   not_found: {
     label: "Session not found",
     className: "bg-danger-soft text-[oklch(0.4_0.18_27)]",

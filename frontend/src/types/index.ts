@@ -90,6 +90,7 @@ export interface OnboardingStatus {
     | "ready"
     | "disconnected"
     | "expired"
+    | "destroyed"
     | "not_found";
   hasQR: boolean;
   /** Raw QR string from whatsapp-web bridge. Encode with qrcode.react.
