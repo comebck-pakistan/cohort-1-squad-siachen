@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Sparkles, Loader2, Mail, Lock } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -7,7 +7,20 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
 
+interface LoginSearch {
+  /**
+   * Set by the signup wizard on success — used to surface a
+   * post-signup welcome toast. Whitelist-only: anything other
+   * than "signup" is treated as undefined so a hostile URL can't
+   * inject messages.
+   */
+  from?: "signup";
+}
+
 export const Route = createFileRoute("/login")({
+  validateSearch: (search: Record<string, unknown>): LoginSearch => ({
+    from: search.from === "signup" ? "signup" : undefined,
+  }),
   head: () => ({
     meta: [
       { title: "Log in — Recepta Salon Owner Portal" },
@@ -24,10 +37,22 @@ export const Route = createFileRoute("/login")({
 
 function LoginPage() {
   const navigate = useNavigate();
+  const search = Route.useSearch();
   const auth = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+
+  // Post-signup welcome toast. Fires once per visit when ?from=signup is
+  // present; the ref guard prevents re-firing if the component remounts
+  // due to a route revalidation while the toast is still on screen.
+  const welcomedRef = useRef(false);
+  useEffect(() => {
+    if (search.from === "signup" && !welcomedRef.current) {
+      welcomedRef.current = true;
+      toast.success("Your salon is ready — sign in to start.");
+    }
+  }, [search.from]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();

@@ -16,8 +16,10 @@ import { Route as OnboardingRouteImport } from './routes/onboarding'
 import { Route as SalonPortalRouteImport } from './routes/salon-portal'
 import { Route as SitemapDotxmlRouteImport } from './routes/sitemap[.]xml'
 import { Route as SuperadminRouteImport } from './routes/superadmin'
+import { Route as WaitlistRouteImport } from './routes/waitlist'
 import { Route as SalonPortalIndexRouteImport } from './routes/salon-portal.index'
 import { Route as SalonPortalAiRulesRouteImport } from './routes/salon-portal.ai-rules'
+import { Route as SalonPortalBookingsRouteImport } from './routes/salon-portal.bookings'
 import { Route as SalonPortalBusinessRouteImport } from './routes/salon-portal.business'
 import { Route as SalonPortalEscalationsRouteImport } from './routes/salon-portal.escalations'
 import { Route as SalonPortalInboxRouteImport } from './routes/salon-portal.inbox'
@@ -63,6 +65,11 @@ const SuperadminRoute = SuperadminRouteImport.update({
   path: '/superadmin',
   getParentRoute: () => rootRouteImport,
 } as any)
+const WaitlistRoute = WaitlistRouteImport.update({
+  id: '/waitlist',
+  path: '/waitlist',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SalonPortalIndexRoute = SalonPortalIndexRouteImport.update({
   id: '/',
   path: '/',
@@ -71,6 +78,11 @@ const SalonPortalIndexRoute = SalonPortalIndexRouteImport.update({
 const SalonPortalAiRulesRoute = SalonPortalAiRulesRouteImport.update({
   id: '/ai-rules',
   path: '/ai-rules',
+  getParentRoute: () => SalonPortalRoute,
+} as any)
+const SalonPortalBookingsRoute = SalonPortalBookingsRouteImport.update({
+  id: '/bookings',
+  path: '/bookings',
   getParentRoute: () => SalonPortalRoute,
 } as any)
 const SalonPortalBusinessRoute = SalonPortalBusinessRouteImport.update({
@@ -127,7 +139,9 @@ export interface FileRoutesByFullPath {
   '/salon-portal': typeof SalonPortalRouteWithChildren
   '/sitemap.xml': typeof SitemapDotxmlRoute
   '/superadmin': typeof SuperadminRouteWithChildren
+  '/waitlist': typeof WaitlistRoute
   '/salon-portal/ai-rules': typeof SalonPortalAiRulesRoute
+  '/salon-portal/bookings': typeof SalonPortalBookingsRoute
   '/salon-portal/business': typeof SalonPortalBusinessRoute
   '/salon-portal/escalations': typeof SalonPortalEscalationsRoute
   '/salon-portal/inbox': typeof SalonPortalInboxRoute
@@ -145,7 +159,9 @@ export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/onboarding': typeof OnboardingRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/waitlist': typeof WaitlistRoute
   '/salon-portal/ai-rules': typeof SalonPortalAiRulesRoute
+  '/salon-portal/bookings': typeof SalonPortalBookingsRoute
   '/salon-portal/business': typeof SalonPortalBusinessRoute
   '/salon-portal/escalations': typeof SalonPortalEscalationsRoute
   '/salon-portal/inbox': typeof SalonPortalInboxRoute
@@ -166,7 +182,9 @@ export interface FileRoutesById {
   '/salon-portal': typeof SalonPortalRouteWithChildren
   '/sitemap.xml': typeof SitemapDotxmlRoute
   '/superadmin': typeof SuperadminRouteWithChildren
+  '/waitlist': typeof WaitlistRoute
   '/salon-portal/ai-rules': typeof SalonPortalAiRulesRoute
+  '/salon-portal/bookings': typeof SalonPortalBookingsRoute
   '/salon-portal/business': typeof SalonPortalBusinessRoute
   '/salon-portal/escalations': typeof SalonPortalEscalationsRoute
   '/salon-portal/inbox': typeof SalonPortalInboxRoute
@@ -188,7 +206,9 @@ export interface FileRouteTypes {
     | '/salon-portal'
     | '/sitemap.xml'
     | '/superadmin'
+    | '/waitlist'
     | '/salon-portal/ai-rules'
+    | '/salon-portal/bookings'
     | '/salon-portal/business'
     | '/salon-portal/escalations'
     | '/salon-portal/inbox'
@@ -206,7 +226,9 @@ export interface FileRouteTypes {
     | '/login'
     | '/onboarding'
     | '/sitemap.xml'
+    | '/waitlist'
     | '/salon-portal/ai-rules'
+    | '/salon-portal/bookings'
     | '/salon-portal/business'
     | '/salon-portal/escalations'
     | '/salon-portal/inbox'
@@ -226,7 +248,9 @@ export interface FileRouteTypes {
     | '/salon-portal'
     | '/sitemap.xml'
     | '/superadmin'
+    | '/waitlist'
     | '/salon-portal/ai-rules'
+    | '/salon-portal/bookings'
     | '/salon-portal/business'
     | '/salon-portal/escalations'
     | '/salon-portal/inbox'
@@ -247,6 +271,7 @@ export interface RootRouteChildren {
   SalonPortalRoute: typeof SalonPortalRouteWithChildren
   SitemapDotxmlRoute: typeof SitemapDotxmlRoute
   SuperadminRoute: typeof SuperadminRouteWithChildren
+  WaitlistRoute: typeof WaitlistRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -300,6 +325,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SuperadminRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/waitlist': {
+      id: '/waitlist'
+      path: '/waitlist'
+      fullPath: '/waitlist'
+      preLoaderRoute: typeof WaitlistRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/salon-portal/': {
       id: '/salon-portal/'
       path: '/'
@@ -312,6 +344,13 @@ declare module '@tanstack/react-router' {
       path: '/ai-rules'
       fullPath: '/salon-portal/ai-rules'
       preLoaderRoute: typeof SalonPortalAiRulesRouteImport
+      parentRoute: typeof SalonPortalRoute
+    }
+    '/salon-portal/bookings': {
+      id: '/salon-portal/bookings'
+      path: '/bookings'
+      fullPath: '/salon-portal/bookings'
+      preLoaderRoute: typeof SalonPortalBookingsRouteImport
       parentRoute: typeof SalonPortalRoute
     }
     '/salon-portal/business': {
@@ -382,6 +421,7 @@ declare module '@tanstack/react-router' {
 
 interface SalonPortalRouteChildren {
   SalonPortalAiRulesRoute: typeof SalonPortalAiRulesRoute
+  SalonPortalBookingsRoute: typeof SalonPortalBookingsRoute
   SalonPortalBusinessRoute: typeof SalonPortalBusinessRoute
   SalonPortalEscalationsRoute: typeof SalonPortalEscalationsRoute
   SalonPortalInboxRoute: typeof SalonPortalInboxRoute
@@ -391,6 +431,7 @@ interface SalonPortalRouteChildren {
 
 const SalonPortalRouteChildren: SalonPortalRouteChildren = {
   SalonPortalAiRulesRoute: SalonPortalAiRulesRoute,
+  SalonPortalBookingsRoute: SalonPortalBookingsRoute,
   SalonPortalBusinessRoute: SalonPortalBusinessRoute,
   SalonPortalEscalationsRoute: SalonPortalEscalationsRoute,
   SalonPortalInboxRoute: SalonPortalInboxRoute,
@@ -430,6 +471,7 @@ const rootRouteChildren: RootRouteChildren = {
   SalonPortalRoute: SalonPortalRouteWithChildren,
   SitemapDotxmlRoute: SitemapDotxmlRoute,
   SuperadminRoute: SuperadminRouteWithChildren,
+  WaitlistRoute: WaitlistRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -1,0 +1,53 @@
+-- =====================================================================
+-- 2026-08-07 — Add 'human_takeover' value to conversation_status enum
+--
+-- Context
+-- -------
+-- The conversations_status enum currently has three values:
+--   'active' | 'escalated' | 'resolved'
+--
+-- The salon-portal's Take Over Chat button (which marks the owner as
+-- manually replying to a conversation) writes status='human_takeover'.
+-- The /api/business/:id/conversations endpoint filters on that value
+-- so owner-takeover conversations surface in the Escalations tab
+-- alongside LLM-flagged escalations 
+--
+-- But the enum doesn't have that value — the filter always returns
+-- 0 rows for the takeover path. Result: clicking Take Over Chat
+-- doesn't make the conversation appear in the Escalations tab. Owner
+-- sees no visible effect from clicking the button.
+--
+-- This migration adds the missing enum value. ALTER TYPE ... ADD VALUE
+-- is idempotent in Postgres 12+ with IF NOT EXISTS.
+--
+-- Safety
+-- ------
+-- - Purely additive — no existing values are removed or renamed.
+-- - No rows are touched.
+-- - Runs in microseconds.
+-- - Idempotent via IF NOT EXISTS (Postgres 12+).
+--
+-- Note on Postgres enum limitation
+-- --------------------------------
+-- ALTER TYPE ... ADD VALUE cannot run inside a transaction block in
+-- some Postgres versions. Run this OUTSIDE a transaction if you
+-- see "ALTER TYPE ... ADD cannot run inside a transaction block".
+-- The default psql behavior is one-statement-per-transaction, so
+-- running this as a top-level statement (no explicit BEGIN/COMMIT)
+-- works on Supabase's hosted Postgres (PG 15+).
+-- =====================================================================
+
+alter type conversation_status
+  add value if not exists 'human_takeover';
+
+-- =====================================================================
+-- Verification (run AFTER the migration):
+--
+--   -- Confirm the new value is in the enum:
+--   select enumlabel
+--   from pg_enum
+--   where enumtypid = 'public.conversation_status'::regtype
+--   order by enumsortorder;
+--
+--   -- Should now show: active, escalated, resolved, human_takeover
+-- =====================================================================

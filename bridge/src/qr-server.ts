@@ -16,6 +16,10 @@ import { childLogger } from './logger';
 //   POST   /onboarding/:businessId/register     — register a new salon with the
 //                                                  SessionManager so a Chromium
 //                                                  session starts and a QR is generated
+//   POST   /onboarding/:businessId/send         — owner-driven outbound send
+//                                                  (proxied from
+//                                                  /api/conversations/:id/owner-reply).
+//                                                  Requires X-Bridge-Token.
 //   DELETE /onboarding/:businessId/session      — disconnect + destroy session
 //
 // The HTML page polls itself every 5–30s so the salon owner sees the QR
@@ -93,6 +97,8 @@ export function createOnboardingRouter(manager: SessionManager): Router {
           status: 'not_found' as const,
           hasQR: false,
           qr: null,
+          pairing_method: null,
+          pairing_code: null,
         });
       }
 
@@ -101,6 +107,12 @@ export function createOnboardingRouter(manager: SessionManager): Router {
         status: client.status,
         hasQR: client.qr !== null,
         qr: client.qr, // raw QR text — frontend renders via qrcode.react
+        // Phone-pairing fields. Both populated only when the salon
+        // owner invoked POST /pair-with-phone; default is null and
+        // method='qr'. The frontend uses these to render either the
+        // QR or the XXXX-XXXX code.
+        pairing_method: client.method,
+        pairing_code: client.pairingCode, // raw "ABCDEFGH" — modal formats
         updated_at: new Date().toISOString(),
       });
     }
@@ -192,6 +204,98 @@ export function createOnboardingRouter(manager: SessionManager): Router {
   );
 
   // -------------------------------------------------------------------------
+  // POST /onboarding/:businessId/pair-with-phone
+  //
+  // Triggers the phone-pairing handshake for an already-registered
+  // client. Body: { phoneNumber: string } in raw digits (E.164, no '+').
+  //
+  // Idempotent only in the sense that calling it twice returns a fresh
+  // code (the library rotates every intervalMs internally). It does NOT
+  // switch the client back to QR mode — once you've picked phone, you
+  // stay on phone until you destroy the session and re-register.
+  //
+  // Errors:
+  //   400 — invalid phoneNumber (empty, wrong format)
+  //   404 — no client registered for this business (must /register first
+  //         OR the previous session was destroyed)
+  //   409 — client exists but isn't initialized yet (chromium still
+  //         booting; caller should poll status until status changes
+  //         off 'initializing')
+  //   500 — library error from the underlying puppeteer page
+  // -------------------------------------------------------------------------
+  router.post(
+    '/onboarding/:businessId/pair-with-phone',
+    async (req: Request, res: Response) => {
+      const { businessId } = req.params;
+      const { phoneNumber } = (req.body || {}) as { phoneNumber?: string };
+
+      if (!phoneNumber || typeof phoneNumber !== 'string' || !phoneNumber.trim()) {
+        return res.status(400).json({
+          error: 'missing or empty `phoneNumber`',
+        });
+      }
+
+      // Existence check first so we can give a clean 404 before the
+      // library call. The underlying client.requestPhonePairing()
+      // throws "no client" as a generic Error — surfacing as 404 here
+      // keeps the contract tidy.
+      const client = manager.getClient(businessId);
+      if (!client) {
+        return res.status(404).json({
+          error: 'No active session for this business. Call /register first.',
+        });
+      }
+
+      // Initialize-check: the public library API only works after
+      // chromium has reached the UNPAIRED state, which initialize()
+      // drives. If the client is still in 'initializing', the library
+      // would throw a generic puppeteer error — give a clean 409
+      // instead so the frontend can poll and retry.
+      if (client.status === 'initializing') {
+        return res.status(409).json({
+          error: 'session still initializing; poll /status and retry once status leaves initializing',
+          current_status: client.status,
+        });
+      }
+
+      try {
+        const code = await manager.requestPhonePairing(
+          businessId,
+          phoneNumber.trim()
+        );
+        log.info(
+          { businessId, codeLength: code.length },
+          'phone pairing code generated'
+        );
+        return res.json({
+          businessId,
+          pairing_method: 'phone' as const,
+          // Raw "ABCDEFGH" — frontend formats as XXXX-XXXX for display.
+          pairing_code: code,
+          status: 'code_pending' as const,
+        });
+      } catch (e) {
+        const message = (e as Error).message;
+        log.error(
+          { businessId, err: message },
+          'phone pairing failed'
+        );
+        // Library-side "Invalid phone" / "Evaluation failed" /
+        // "PairingCodeLinkUtils timeout" all surface here. Let the
+        // frontend render the message — operator can decide whether
+        // to retry.
+        if (
+          message.includes('Invalid phone') ||
+          message.includes('8-15 digits')
+        ) {
+          return res.status(400).json({ error: message });
+        }
+        return res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  // -------------------------------------------------------------------------
   // DELETE /onboarding/:businessId/session
   //
   // Disconnects the salon — useful when the owner wants to unpair their
@@ -219,6 +323,93 @@ export function createOnboardingRouter(manager: SessionManager): Router {
         return res
           .status(500)
           .json({ error: `Failed to disconnect: ${(e as Error).message}` });
+      }
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // POST /onboarding/:businessId/send
+  //
+  // Owner-driven outbound send. The salon portal's "Take Over Chat" +
+  // textarea → Send button hits the backend's
+  // /api/conversations/:id/owner-reply endpoint, which then proxies
+  // here. The bridge is the only place that owns the live
+  // WhatsAppWebClient instance, so this is where the actual `sendMessage`
+  // call has to land.
+  //
+  // Auth: the calling backend (and only the backend) sets
+  // `X-Bridge-Token: <shared secret>`. We require it here as defense
+  // in depth — a hostile party who guesses the business UUID cannot
+  // drive sends without the token. Mirrors the backend's
+  // requireBridgeToken pattern in routes/bridge.ts.
+  //
+  // Body: { to: string, text: string }
+  //   to   — the customer's chat id in @c.us or LID format (whatever
+  //          whatsapp-web.js expects for client.sendMessage). The
+  //          backend is responsible for resolving the normalized
+  //          phone back to the right format before calling.
+  //   text — the reply text. Trimmed; refused if empty.
+  //
+  // Returns: { ok: true, to } on success.
+  //          401 invalid/missing X-Bridge-Token
+  //          400 missing/empty body fields
+  //          404 no active client for this business (session lost or
+  //               never paired)
+  //          500 sendTextMessage threw — logs and surfaces the error
+  //               so the backend can decide whether to mark the
+  //               owner_message as failed in the messages table.
+  // -------------------------------------------------------------------------
+  router.post(
+    '/onboarding/:businessId/send',
+    async (req: Request, res: Response) => {
+      const expected = process.env.BRIDGE_INTERNAL_TOKEN;
+      if (!expected) {
+        log.warn('BRIDGE_INTERNAL_TOKEN not configured; refusing outbound send');
+        return res
+          .status(503)
+          .json({ error: 'bridge send service not configured' });
+      }
+      if (req.header('x-bridge-token') !== expected) {
+        return res
+          .status(401)
+          .json({ error: 'invalid or missing X-Bridge-Token' });
+      }
+
+      const { businessId } = req.params;
+      const { to, text } = (req.body || {}) as {
+        to?: string;
+        text?: string;
+      };
+
+      if (!to || typeof to !== 'string' || !to.trim()) {
+        return res.status(400).json({ error: 'missing or empty `to`' });
+      }
+      if (!text || typeof text !== 'string' || !text.trim()) {
+        return res.status(400).json({ error: 'missing or empty `text`' });
+      }
+
+      const client = manager.getClient(businessId);
+      if (!client) {
+        return res
+          .status(404)
+          .json({ error: 'No active WhatsApp session for this business' });
+      }
+
+      try {
+        await client.sendTextMessage(to.trim(), text.trim());
+        log.info(
+          { businessId, to, textLength: text.trim().length },
+          'outbound owner-send dispatched'
+        );
+        return res.json({ ok: true, to: to.trim() });
+      } catch (e) {
+        log.error(
+          { businessId, err: (e as Error).message },
+          'outbound owner-send failed'
+        );
+        return res
+          .status(500)
+          .json({ error: `send failed: ${(e as Error).message}` });
       }
     }
   );

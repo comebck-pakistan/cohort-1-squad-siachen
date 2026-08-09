@@ -5,6 +5,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Select,
@@ -23,13 +24,56 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { PaymentStatusBadge as _unused, StatusBadge, TierBadge } from "./StatusBadge";
-import { AlertTriangle, Plus, Search, Trash2 } from "lucide-react";
+import { AlertTriangle, Plus, Search, Trash2, Clock, CheckCheck, AlertOctagon } from "lucide-react";
 import { toast } from "sonner";
 import { AddSalonModal } from "@/components/modals/AddSalonModal";
 import { DeleteSalonModal } from "@/components/modals/DeleteSalonModal";
 import type { BillingStatus, Business, Tier } from "@/types";
 
 void _unused;
+
+// Wave 7 (Phase 5) — Trial lifecycle badge.
+//
+// Renders a compact pill per row so the superadmin can scan who is
+// approaching expiry at a glance. Uses server-computed days_remaining
+// (set in adaptBusiness on the backend) so the frontend never has to
+// duplicate the timezone math.
+function TrialBadge({
+  status,
+  daysRemaining,
+}: {
+  status: Business["trial_status"];
+  daysRemaining: number | null;
+}) {
+  if (status === "converted") {
+    return (
+      <Badge className="bg-success-soft text-[oklch(0.35_0.12_145)] border-transparent gap-1">
+        <CheckCheck className="size-3" /> Paid
+      </Badge>
+    );
+  }
+  if (status === "expired") {
+    return (
+      <Badge className="bg-danger-soft text-[oklch(0.4_0.18_27)] border-transparent gap-1">
+        <AlertOctagon className="size-3" /> Expired
+      </Badge>
+    );
+  }
+  if (status === "expiring_soon") {
+    return (
+      <Badge className="bg-warning-soft text-[oklch(0.45_0.14_70)] border-transparent gap-1">
+        <Clock className="size-3" /> Expiring
+      </Badge>
+    );
+  }
+  // 'active' or undefined (legacy). Show days remaining when we know it.
+  if (daysRemaining === null) return <span className="text-xs text-muted-foreground">—</span>;
+  return (
+    <Badge variant="outline" className="gap-1">
+      <Clock className="size-3" /> {daysRemaining}d
+    </Badge>
+  );
+}
 
 export function SalonsTab() {
   const [q, setQ] = useState("");
@@ -48,6 +92,23 @@ export function SalonsTab() {
       qc.invalidateQueries({ queryKey: qk.salons });
     },
     onError: () => toast.error("Failed to update agent status"),
+  });
+
+  // Wave 7 (Phase 5) — manual trial override actions. Re-fetch the
+  // salons list on success so the Trial column reflects the new state.
+  const extendTrialMut = useMutation({
+    mutationFn: ({ id, days }: { id: string; days: number }) =>
+      api.extendTrial(id, days),
+    onSuccess: (_data, vars) =>
+      toast.success(`Extended trial by ${vars.days} days.`),
+    onError: (e: Error) => toast.error(`Extend failed: ${e.message}`),
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.salons }),
+  });
+  const convertTrialMut = useMutation({
+    mutationFn: (id: string) => api.convertTrial(id),
+    onSuccess: () => toast.success("Marked as paid. Trial enforcement off."),
+    onError: (e: Error) => toast.error(`Convert failed: ${e.message}`),
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.salons }),
   });
 
   const cities = useMemo(() => {
@@ -138,6 +199,7 @@ export function SalonsTab() {
                   <TableHead>City</TableHead>
                   <TableHead>Messages / mo</TableHead>
                   <TableHead>Billing</TableHead>
+                  <TableHead>Trial</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -145,7 +207,7 @@ export function SalonsTab() {
                 {salons.isLoading ? (
                   Array.from({ length: 5 }).map((_, i) => (
                     <TableRow key={i}>
-                      {Array.from({ length: 7 }).map((__, j) => (
+                      {Array.from({ length: 8 }).map((__, j) => (
                         <TableCell key={j}>
                           <Skeleton className="h-4 w-full animate-pulse" />
                         </TableCell>
@@ -154,7 +216,7 @@ export function SalonsTab() {
                   ))
                 ) : rows.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="text-center py-10 text-muted-foreground">
+                    <TableCell colSpan={8} className="text-center py-10 text-muted-foreground">
                       No salons match the current filters.
                     </TableCell>
                   </TableRow>
@@ -177,6 +239,12 @@ export function SalonsTab() {
                       </TableCell>
                       <TableCell>
                         <StatusBadge status={b.billing_status} />
+                      </TableCell>
+                      <TableCell>
+                        <TrialBadge
+                          status={b.trial_status}
+                          daysRemaining={b.days_remaining ?? null}
+                        />
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex items-center justify-end gap-2">
@@ -215,6 +283,28 @@ export function SalonsTab() {
                                 </Tooltip>
                               )}
                             </div>
+                          )}
+                          {b.trial_status !== "converted" && (
+                            <>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => extendTrialMut.mutate({ id: b.id, days: 7 })}
+                                disabled={extendTrialMut.isPending}
+                                title="Push trial_ends_at forward 7 days, reset status to active"
+                              >
+                                +7d
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => convertTrialMut.mutate(b.id)}
+                                disabled={convertTrialMut.isPending}
+                                title="Mark as paid. Bot resumes normal replies."
+                              >
+                                <CheckCheck className="size-4" /> Paid
+                              </Button>
+                            </>
                           )}
                           <Button variant="destructive" size="sm" onClick={() => setDeleteFor(b)}>
                             <Trash2 className="size-4" /> Delete

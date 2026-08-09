@@ -8,6 +8,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -20,8 +22,9 @@ import {
   PowerOff,
   Cloud,
   MessageSquare,
+  QrCode,
 } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { api, qk } from "@/lib/api";
 import { useTenantBusinessId } from "@/lib/useTenantBusinessId";
 import { toast } from "sonner";
@@ -87,6 +90,13 @@ const statusMeta: Record<
     className: "bg-muted text-muted-foreground border-transparent",
     description: "QR scanned successfully. Session is finalizing.",
   },
+  code_pending: {
+    label: "Phone pairing — enter code on your phone",
+    className:
+      "bg-warning-soft text-[oklch(0.35_0.1_70)] border-transparent",
+    description:
+      "On your salon's WhatsApp: Settings → Linked Devices → Link a Device → Link with phone number instead → enter the code shown.",
+  },
   disconnected: {
     label: "Disconnected",
     className: "bg-danger-soft text-[oklch(0.4_0.18_27)] border-transparent",
@@ -120,6 +130,33 @@ function metaFor(status: OnboardingStatus["status"]) {
   );
 }
 
+/**
+ * Format the raw 8-char pairing code from the library as XXXX-XXXX
+ * the way WhatsApp displays it in its own Linked Devices UI. Defensive
+ * against malformed input (returns a placeholder if shape is off).
+ */
+function formatPairingCode(raw: string | null | undefined): string {
+  if (!raw) return "--------";
+  if (raw.length !== 8) return raw;
+  return `${raw.slice(0, 4)}-${raw.slice(4)}`;
+}
+
+/**
+ * Sanity-check the phone number input the user types. Library wants
+ * raw digits with country code, no '+', no spaces, no dashes (E.164).
+ * 8-15 digits per E.164 spec — matches whatsapp-web.js's documented
+ * format ("international, symbol-free").
+ */
+function sanitizePhoneInput(input: string): string {
+  return (input || "").replace(/[^0-9]/g, "");
+}
+
+function isPhoneValid(digits: string): boolean {
+  return digits.length >= 8 && digits.length <= 15;
+}
+
+type PairingMethod = "qr" | "phone";
+
 export const Route = createFileRoute("/salon-portal/onboarding")({
   head: () => ({
     meta: [
@@ -138,6 +175,13 @@ function OnboardingPage() {
   const tenant = useTenantBusinessId();
   const qc = useQueryClient();
   const businessId = tenant.data?.businessId;
+
+  // Phone-pairing UI state. Default to QR (matches the spec — phone is
+  // secondary, an owner who can scan the camera should not be pushed
+  // to the phone flow first). The bridge's reported pairing_method
+  // overrides this once a pairing call lands.
+  const [method, setMethod] = useState<PairingMethod>("qr");
+  const [phoneInput, setPhoneInput] = useState("");
 
   // Transport-aware info — primary source of truth.
   const info = useQuery({
@@ -189,6 +233,20 @@ function OnboardingPage() {
       qc.invalidateQueries({ queryKey: qk.onboarding(businessId!) });
     },
     onError: () => toast.error("Disconnect failed"),
+  });
+
+  // Phone-pairing trigger. On success the next /status poll (≤2.5s)
+  // picks up pairing_method='phone' + status='code_pending' and the
+  // UI flips to the code display automatically.
+  const pairWithPhone = useMutation({
+    mutationFn: (digits: string) => api.pairWithPhone(businessId!, digits),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.onboarding(businessId!) });
+    },
+    onError: (e) =>
+      toast.error("Phone pairing failed", {
+        description: String((e as Error).message),
+      }),
   });
 
   if (!businessId) {
@@ -260,9 +318,20 @@ function OnboardingPage() {
       s={(status.data?.status ?? "initializing") as OnboardingStatus["status"]}
       statusLoading={status.isLoading}
       qr={status.data?.qr ?? null}
+      bridgeMethod={status.data?.pairing_method ?? null}
+      method={method}
+      pairingCode={status.data?.pairing_code ?? null}
+      phoneInput={phoneInput}
+      onPhoneInputChange={setPhoneInput}
+      pairPending={pairWithPhone.isPending}
+      pairError={
+        pairWithPhone.error ? (pairWithPhone.error as Error).message : null
+      }
+      onSubmitPhone={() => pairWithPhone.mutate(sanitizePhoneInput(phoneInput))}
       info={info.data!}
       businessId={businessId}
       registerPending={register.isPending}
+      onSwitchMethod={setMethod}
       onRestart={() => register.mutate()}
       onOpenPairingWindow={() => {
         window.open(
@@ -367,9 +436,18 @@ function WebOnboarding({
   s,
   statusLoading,
   qr,
+  bridgeMethod,
+  method,
+  pairingCode,
+  phoneInput,
+  onPhoneInputChange,
+  pairPending,
+  pairError,
+  onSubmitPhone,
   info,
   businessId,
   registerPending,
+  onSwitchMethod,
   onRestart,
   onOpenPairingWindow,
   onDisconnect,
@@ -378,9 +456,21 @@ function WebOnboarding({
   s: OnboardingStatus["status"];
   statusLoading: boolean;
   qr: string | null;
+  /** Bridge-reported pairing method, raw from the status endpoint.
+   *  null when no client is registered yet. */
+  bridgeMethod: "qr" | "phone" | null;
+  /** Local UI method chosen by the owner (toggle button). */
+  method: PairingMethod;
+  pairingCode: string | null;
+  phoneInput: string;
+  onPhoneInputChange: (v: string) => void;
+  pairPending: boolean;
+  pairError: string | null;
+  onSubmitPhone: () => void;
   info: { instructions: string };
   businessId: string;
   registerPending: boolean;
+  onSwitchMethod: (m: PairingMethod) => void;
   onRestart: () => void;
   onOpenPairingWindow: () => void;
   onDisconnect: () => void;
@@ -388,7 +478,42 @@ function WebOnboarding({
 }) {
   const meta = metaFor(s);
   const isReady = s === "ready";
-  const showQR = !isReady && qr !== null && qr.length > 0;
+  const isConnecting = !isReady && s !== "not_found";
+
+  // BUGFIX: don't let the bridge's default `pairing_method: "qr"`
+  // override the user's local toggle. The bridge value is only the
+  // source of truth when it's "phone" (proves a phone-pairing call
+  // has actually landed). Before that, the user's local selection
+  // drives the UI.
+  const effectiveMethod: PairingMethod =
+    bridgeMethod === "phone" ? "phone" : method;
+
+  // Debug — surfaces the resolved method + key derived flags so we
+  // can see what the UI is rendering. Remove once the toggle works
+  // reliably end-to-end.
+  // eslint-disable-next-line no-console
+  console.log("[Onboarding] render", {
+    s,
+    method,
+    bridgeMethod,
+    effectiveMethod,
+    qrLength: qr?.length ?? 0,
+  });
+
+  const showQR =
+    effectiveMethod === "qr" &&
+    !isReady &&
+    qr !== null &&
+    qr.length > 0;
+  const sanitizedPhone = sanitizePhoneInput(phoneInput);
+  const phoneValid = isPhoneValid(sanitizedPhone);
+  const showPhoneForm =
+    effectiveMethod === "phone" &&
+    s !== "code_pending" &&
+    s !== "authenticated" &&
+    s !== "ready";
+  const showPairingCode =
+    effectiveMethod === "phone" && s === "code_pending";
 
   return (
     <div className="p-6 space-y-6 max-w-3xl">
@@ -408,10 +533,49 @@ function WebOnboarding({
             <Smartphone className="size-4" /> Connection status
           </CardTitle>
           <CardDescription>
-            Polled every 2.5 seconds. Status flips automatically when you scan.
+            Polled every 2.5 seconds. Status flips automatically when you
+            scan or enter the code.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          {/* Method toggle — QR is primary, Phone is secondary (same
+              pattern WhatsApp's own UI uses). Hidden once connected. */}
+          {isConnecting && (
+            <div className="flex gap-2">
+              <Button
+                variant={effectiveMethod === "qr" ? "default" : "outline"}
+                size="sm"
+                className="flex-1"
+                onClick={() => {
+                  // eslint-disable-next-line no-console
+                  console.log("[Onboarding] toggle click → qr");
+                  onSwitchMethod("qr");
+                }}
+                disabled={pairPending}
+              >
+                <QrCode className="size-4" />
+                Scan QR code
+              </Button>
+              <Button
+                variant={effectiveMethod === "phone" ? "default" : "outline"}
+                size="sm"
+                className="flex-1"
+                onClick={() => {
+                  // eslint-disable-next-line no-console
+                  console.log("[Onboarding] toggle click → phone", {
+                    prev: effectiveMethod,
+                    willSet: "phone",
+                  });
+                  onSwitchMethod("phone");
+                }}
+                disabled={pairPending}
+              >
+                <Smartphone className="size-4" />
+                Link with phone number instead
+              </Button>
+            </div>
+          )}
+
           {statusLoading ? (
             <Skeleton className="h-20 w-full" />
           ) : (
@@ -419,7 +583,7 @@ function WebOnboarding({
               <div className="flex items-center gap-3">
                 {s === "ready" ? (
                   <CheckCircle2 className="size-6 text-[oklch(0.4_0.14_145)]" />
-                ) : s === "qr_ready" ? (
+                ) : s === "qr_ready" || s === "qr_pending" ? (
                   <Loader2 className="size-6 animate-spin text-[oklch(0.35_0.1_70)]" />
                 ) : s === "not_found" ? (
                   <AlertTriangle className="size-6 text-[oklch(0.5_0.18_27)]" />
@@ -433,9 +597,7 @@ function WebOnboarding({
               </p>
               <p className="text-xs text-muted-foreground">{info.instructions}</p>
 
-              {/* Inline QR — the same QR that powers the standalone backend
-                  pairing page, rendered directly here via qrcode.react so
-                  the salon owner doesn't have to pop a second window. */}
+              {/* QR MODE — inline scannable QR */}
               {showQR && (
                 <div className="flex flex-col items-center gap-3 pt-2">
                   <div className="rounded-2xl border-2 border-foreground/10 bg-white p-5 shadow-sm">
@@ -449,6 +611,67 @@ function WebOnboarding({
                   </div>
                   <p className="text-[11px] text-muted-foreground">
                     QR refreshes automatically as it rotates.
+                  </p>
+                </div>
+              )}
+
+              {/* PHONE MODE — input form. Hidden once code arrives. */}
+              {showPhoneForm && (
+                <div className="flex flex-col gap-2 pt-2">
+                  <Label htmlFor="phone-number-page" className="text-sm">
+                    Salon's WhatsApp number
+                  </Label>
+                  <Input
+                    id="phone-number-page"
+                    type="tel"
+                    inputMode="numeric"
+                    placeholder="923001234567"
+                    value={phoneInput}
+                    onChange={(e) => onPhoneInputChange(e.target.value)}
+                    disabled={pairPending}
+                    autoComplete="off"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Digits only, country code first (e.g. 92 for Pakistan, no
+                    "+"). 8–15 digits.
+                  </p>
+                  <Button
+                    onClick={onSubmitPhone}
+                    disabled={!phoneValid || pairPending}
+                    className="mt-1"
+                  >
+                    {pairPending ? (
+                      <>
+                        <Loader2 className="size-4 animate-spin" />
+                        Generating code…
+                      </>
+                    ) : (
+                      "Generate pairing code"
+                    )}
+                  </Button>
+                  {pairError && (
+                    <p className="text-xs text-destructive">{pairError}</p>
+                  )}
+                </div>
+              )}
+
+              {/* PHONE MODE — code display */}
+              {showPairingCode && (
+                <div className="flex flex-col items-center gap-3 pt-2">
+                  <p className="text-xs text-muted-foreground text-center">
+                    On your salon's WhatsApp: Settings → Linked Devices → Link
+                    a Device → <strong>Link with phone number instead</strong>{" "}
+                    → enter this code:
+                  </p>
+                  <div
+                    className="font-mono text-4xl font-bold tracking-widest px-8 py-5 rounded-lg bg-white border-2 border-foreground/10 select-all shadow-sm"
+                    aria-label="pairing code"
+                    data-testid="pairing-code"
+                  >
+                    {formatPairingCode(pairingCode)}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    Code rotates automatically every few minutes.
                   </p>
                 </div>
               )}
@@ -486,7 +709,8 @@ function WebOnboarding({
         </CardContent>
       </Card>
 
-      {!isReady && (
+      {/* How-to card — adapts to the chosen method */}
+      {!isReady && effectiveMethod === "qr" && (
         <Card className="border shadow-none bg-white">
           <CardHeader>
             <CardTitle className="text-base">How to scan</CardTitle>
@@ -503,6 +727,37 @@ function WebOnboarding({
               </li>
               <li>
                 Point the camera at the QR. Within a few seconds this page
+                flips to <em>Connected</em>.
+              </li>
+            </ol>
+          </CardContent>
+        </Card>
+      )}
+
+      {!isReady && effectiveMethod === "phone" && (
+        <Card className="border shadow-none bg-white">
+          <CardHeader>
+            <CardTitle className="text-base">
+              How to link with phone number
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ol className="space-y-2 text-sm text-foreground/80 list-decimal pl-5">
+              <li>
+                Use this when you're on the same phone as your salon's
+                WhatsApp — there's no camera to scan with.
+              </li>
+              <li>
+                Enter your salon's WhatsApp number above (digits only, with
+                country code, e.g. <code>923001234567</code>).
+              </li>
+              <li>
+                On your phone, open WhatsApp → <strong>Settings</strong> →{" "}
+                <strong>Linked Devices</strong> → <strong>Link a Device</strong>{" "}
+                → tap <strong>Link with phone number instead</strong>.
+              </li>
+              <li>
+                Type the 8-character code shown above. Within seconds this page
                 flips to <em>Connected</em>.
               </li>
             </ol>

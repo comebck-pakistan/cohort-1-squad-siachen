@@ -31,6 +31,420 @@ export async function getBusinessIdForPhoneNumberId(phoneNumberId: string): Prom
 }
 
 /**
+ * Story 13 — read whether this business's AI is currently enabled.
+ *
+ * Called by handleIncomingMessage() at the top of every turn to decide
+ * whether to skip the LLM. Defaults to TRUE (active) if the row is
+ * missing or the lookup errors — fail-open is the right choice here,
+ * because the alternative (fail-closed) silently drops replies for a
+ * salon that just hit a transient DB hiccup.
+ *
+ * The kill switch on the column comment reads: "kill switch
+ * (superadmin OR owner pause)" — both surfaces flip the same field.
+ */
+/**
+ * Set the customer's display name IF they don't already have one.
+ *
+ * Called from message-handler.ts when the LLM extracts a `customer_name`
+ * slot. The bot learns the customer's name in conversation_state first
+ * (per the slot-locking prompt rules), but customers.name is the field
+ * the inbox list / dashboard render for the display label — without this
+ * helper, every conversation kept showing the raw phone number as the
+ * display name even after the bot knew the customer's name.
+ *
+ * Guard rails:
+ *   - Refuses to write when the customer already has a non-empty name.
+ *     We never overwrite a name the owner or a prior session may have
+ *     set — even if the LLM "corrects" itself, that's a human decision.
+ *   - Refuses to write empty / whitespace-only / placeholder values
+ *     ("unknown", "customer", "—", phone-shaped strings).
+ *   - Trims before checking length and before writing.
+ *   - Best-effort: logs and swallows any error so the bot's reply path
+ *     is never blocked by a name-write hiccup.
+ */
+/**
+ * True when the phone identifier from whatsapp-web.js looks like a
+ * LID-format string instead of a normal `@c.us` identifier.
+ *
+ * whatsapp-web.js (used by the WhatsApp-Web transport) sometimes hands
+ * us IDs shaped like `966541183544-1454589702` — digits, a dash, more
+ * digits — with no `@c.us` (or `@lid`) suffix. These come from a
+ * newer WhatsApp client-side identifier scheme and we don't yet know
+ * whether every one of them maps cleanly to a real phone number.
+ *
+ * We don't want to silently drop the customer message (per team
+ * decision 2026-08-07) because we don't yet know if it's a real
+ * customer or a client-side quirk. Instead we flag the conversation
+ * via markConversationNeedsReviewLid() so it shows up in the
+ * Escalations tab with a clear visual badge for the owner to triage.
+ *
+ * Important: this is BEFORE @-suffix normalization. The matching
+ * normalizePhone() strips at the first `@`, so any string with a dash
+ * and no `@` is suspicious. We deliberately do NOT flag normal
+ * @c.us / @lid identifiers — only the dash-only shape.
+ */
+export function isLidFormat(rawPhone: string): boolean {
+  if (!rawPhone) return false;
+  // If there's any @ at all, it's a normal WhatsApp identifier
+  // (either @c.us for individual chats or @lid for the LID scheme).
+  if (rawPhone.includes('@')) return false;
+  // The LID-format shape: digits, a dash, more digits. We require
+  // BOTH sides to be digit-heavy so we don't accidentally flag
+  // already-normalized phone numbers that happen to contain a dash.
+  const m = rawPhone.match(/^(\d+)-(\d+)$/);
+  if (!m) return false;
+  // Sanity check: both halves should look phone-shaped (>= 6 digits).
+  // Pure LID strings in the wild are typically 12-15 digits on the
+  // left (the phone) and 8-12 on the right (the per-account suffix).
+  return m[1].length >= 6 && m[2].length >= 4;
+}
+
+/**
+ * True when the identifier is for a WhatsApp GROUP (not a 1:1 customer).
+ *
+ * Detected by:
+ *   1. Explicit `@g.us` suffix in any position. WhatsApp's
+ *      canonical group JID is `<group-id>@g.us` where group-id is
+ *      typically 15-18 digits.
+ *   2. 15-18 digit bare numerics with no separators. This is the
+ *      newer whatsapp-web.js shape where the `@g.us` suffix has
+ *      been stripped — common since mid-2026. Examples:
+ *        "120363207662725526"  (18 digits, group)
+ *        "158536017404126"     (15 digits, group)
+ *        "279989102588003"     (15 digits, group)
+ *      These look superficially like phone numbers but they're
+ *      chat JIDs — you can't 1:1 message them.
+ *
+ * Note this is a heuristic for the 15-18 digit case — a real
+ * Pakistani phone number is 12 digits starting with `92`, and a
+ * real US number is 10-11 digits starting with `1`. So 15-18
+ * digits with no separator is almost certainly a chat JID.
+ *
+ * Caller: handleIncomingMessage() at the very top, to skip group
+ * messages entirely. They should never become customer rows in
+ * our DB (a group isn't a customer), and replying to a group
+ * message with a 1:1 send produces "No LID for user" errors.
+ */
+export function isGroupChat(rawFrom: string): boolean {
+  if (!rawFrom) return false;
+  // Case 1: explicit @g.us suffix
+  if (rawFrom.includes('@g.us')) return true;
+  // Case 2: 15-18 digit bare numeric with no separators — chat JID
+  if (/^\d{15,18}$/.test(rawFrom)) return true;
+  // Case 3: LID-format with @g.us suffix (rare but possible)
+  if (/^\d+-\d+@g\.us$/.test(rawFrom)) return true;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Medical-concern detector — keyword/pattern check that runs INDEPENDENTLY
+// of the LLM. We do NOT trust the LLM to flag medical concerns reliably:
+// it can bucket health-adjacent questions under intent='other' with high
+// confidence, and the LLM is not trained to escalate health concerns
+// without being told. The salon owner needs to be notified whenever a
+// customer asks about allergic reactions, pain/injury, pregnancy, skin
+// /scalp/rash/infection symptoms, or "is X safe for Y" safety queries —
+// even if the bot would otherwise reply politely and decline.
+//
+// The pattern list is intentionally broad-but-focused: we want to catch
+// symptomatic phrasing ("I have a rash", "my hand is swelling") plus
+// safety queries ("is this safe for pregnant?"), without false-firing
+// on services that happen to mention skin or nails
+// ("I want a skin facial", "what's your nail art service").
+//
+// Tighter than the LLM-based intent check because we're catching a
+// narrower set of intents — health-adjacent questions only.
+// ---------------------------------------------------------------------------
+
+const MEDICAL_PATTERNS: RegExp[] = [
+  // === Allergic reaction / hypersensitivity ===
+  /\ballergic?\b/i,            // allergic, allergy
+  /\bhives\b/i,
+  /\bswell(?:ing|ed|en)?\b/i,
+  /\bswollen\b/i,              // past participle — not covered by the above
+  /\bnettle\s*rash\b/i,
+
+  // === Skin / scalp / rash / infection symptoms ===
+  /\brash\b/i,
+  // Broader infection coverage — "infected" / "infecting" / "infects"
+  // were missed by the original `\binfection\b` exact-word match.
+  /\binfect(?:ion|ed|ing|s)?\b/i,
+  /\bpus\b/i,                  // the medical term
+  /\bpuss\b/i,                 // common typo
+  /\babscess\b/i,              // localized infection
+  /\bdischarge\b/i,            // symptom
+  /\bsmelly\b/i,               // customer word for foul odor
+  /\bsor(?:e|eness)\b/i,        // sore, soreness
+  /\bitch(?:y|ing|iness)?\b/i,
+  /\beczema\b/i,
+  /\bpsoriasis\b/i,
+  /\bbumps?\b/i,
+  /\bblister(?:s|ed|ing)?\b/i,
+  /\bscab(?:s|bing)?\b/i,
+  /\bflak(?:y|ing)\b/i,
+  /\bred\s+spots?\b/i,
+
+  // === Pain / injury ===
+  /\bpa[ie]n\b/i,              // pain, pein (common typo)
+  /\bhurt(?:s|ing)?\b/i,
+  /\binjur(?:y|ed|ies)\b/i,
+  /\bbleeding\b/i,
+  /\bburn(?:s|ed|ing)?\b/i,
+  /\bwound\b/i,
+
+  // === Pregnancy / nursing ===
+  /\bpregnan(?:t|cy)\b/i,
+  /\bbreastfeeding\b/i,
+  /\bnursing\b/i,
+  /\bexpecting\b/i,
+  /\btrimester\b/i,
+  /\bbreastfeed\b/i,
+
+  // === Safety queries — "is X safe for Y" ===
+  /safe\s+for\s+(?:my|me|kids?|children|baby|skin|child|pregnant|sensitive|face|scalp)/i,
+  /is\s+(?:this|that|it)\s+safe/i,
+  /can\s+i\s+(?:use|get|have|do)\s+(?:this|that|it)\s+(?:while|during|if|when)\b/i,
+  /\bsafe\s+hai\b/i,           // Roman Urdu: "is it safe"
+
+  // === Medical-care vocabulary (safety net for symptoms customers
+  //     describe without using the precise medical term) ===
+  /\bdoctor\b/i,               // "see a doctor"
+  /\bdermatologist\b/i,        // skin specialist
+  /\bemergency\b/i,            // medical emergency
+  /\bhospital\b/i,             // hospital
+  /\bmedical\b/i,              // generic safety net ("medical insurance",
+                               // "medical condition", "medical expenses")
+];
+
+/**
+ * Return true if the customer message contains a clear medical-concern
+ * signal. This is the hard-keyword path — when it returns true the
+ * producer should create an escalation_events row with
+ * reason='medical_concern' regardless of what the LLM returns.
+ */
+export function detectMedicalConcern(text: string): boolean {
+  if (!text) return false;
+  return MEDICAL_PATTERNS.some((re) => re.test(text));
+}
+
+// ---------------------------------------------------------------------------
+// Edge case rules — owned by the platform (business_id IS NULL) and by
+// individual salons. Returned as a single flat list for the LLM prompt.
+// ---------------------------------------------------------------------------
+
+export interface EdgeCaseRule {
+  rule_text: string;
+  rule_type: string; // 'hard' | 'soft'
+}
+
+export async function getEdgeCaseRules(
+  businessId: string
+): Promise<EdgeCaseRule[]> {
+  // Platform-level rules (business_id IS NULL) + per-salon rules
+  // (business_id = this). Inactive rows are filtered out.
+  const { data, error } = await getSupabase()
+    .from('edge_case_rules')
+    .select('rule_text, rule_type')
+    .eq('is_active', true)
+    .or(`business_id.is.null,business_id.eq.${businessId}`);
+
+  if (error) {
+    console.warn('[db.ts] getEdgeCaseRules failed:', error.message);
+    return [];
+  }
+  return (data || []) as EdgeCaseRule[];
+}
+
+/**
+ * Stamp the customer's wa_chat_id (raw WhatsApp identifier) IF we
+ * don't already have one OR the existing one differs from this one.
+ *
+ * whatsapp-web.js hands us customer identifiers in one of two
+ * shapes:
+ *   1. Normal     — "<digits>@c.us"   (e.g. "923001234567@c.us")
+ *   2. LID-format — "<digits>-<digits>" with no "@" suffix
+ *                    (e.g. "966541183544-1454589702")
+ *
+ * Until now we only stored the normalized digits in customers.phone.
+ * That works for inbound routing, but breaks outbound: the
+ * owner-reply endpoint constructs `${phone}@c.us`, and WhatsApp
+ * rejects it with "No LID for user" when the customer's actual
+ * identifier is in LID format.
+ *
+ * This helper stores the raw `from` value exactly as whatsapp-web.js
+ * handed it to us, so the owner-reply endpoint can pass it back
+ * verbatim. Both shapes are valid WhatsApp chatIds and round-trip
+ * cleanly.
+ *
+ * Guard rails:
+ *   - Refuses to write empty / whitespace-only values. Nothing
+ *     useful to store.
+ *   - Idempotent: if the customer already has a non-null
+ *     wa_chat_id, we don't overwrite it. This matters because if
+ *     a customer's identifier ever changes (e.g. they re-install
+ *     WhatsApp and the new client hands us a different LID), we
+ *     want the next inbound message to overwrite — but we don't
+ *     want to overwrite on EVERY message (would just churn DB
+ *     writes for no benefit and risk races).
+ *
+ *     The "overwrite if different" rule is the right balance:
+ *     stable identifier → 1 write total. New identifier after
+ *     re-install → 1 write to update.
+ *   - Best-effort: logs and swallows any error so the customer's
+ *     reply path is never blocked by a wa_chat_id hiccup.
+ *
+ * Caller: message-handler.ts on every inbound turn. Both LID-format
+ * and normal @c.us identifiers get written — we always want the
+ * most accurate identifier available for outbound.
+ */
+export async function upsertCustomerChatId(
+  customerId: string,
+  candidateChatId: string | null | undefined
+): Promise<void> {
+  if (!candidateChatId) return;
+  const trimmed = candidateChatId.trim();
+  if (trimmed.length === 0) return;
+
+  // Conditional UPDATE — only flip wa_chat_id where it's currently
+  // NULL OR differs from the new value. The OR condition lets us
+  // pick up identifier changes (re-installs) without churning the
+  // column on every turn for stable customers.
+  //
+  // We compare with .neq('wa_chat_id', trimmed) which Postgres
+  // treats as NULL-safe in Supabase: NULL != '<value>' so the
+  // .or() catches both "no row" and "different value".
+  const { error } = await getSupabase()
+    .from('customers')
+    .update({ wa_chat_id: trimmed })
+    .eq('id', customerId)
+    .or(`wa_chat_id.is.null,wa_chat_id.neq.${trimmed}`);
+
+  if (error) {
+    console.warn(
+      `[db.ts] upsertCustomerChatId failed (customer=${customerId}):`,
+      error.message
+    );
+  }
+}
+
+/**
+ * Stamp a conversation as needing human review because the originating
+ * customer identifier was in LID format (see isLidFormat()).
+ *
+ * We reuse the existing escalation_events table with a dedicated
+ * reason value so this surfaces in the same Escalations tab as
+ * customer_complaint / low_confidence — no schema change required.
+ * Idempotent within a short window via .maybeSingle() precondition:
+ * only writes if no unresolved LID-format escalation exists yet.
+ *
+ * Returns silently on error — the customer's reply path is more
+ * important than the flag, and the message-handler logs the failure.
+ */
+export async function markConversationNeedsReviewLid(
+  conversationId: string,
+  rawPhone: string
+): Promise<void> {
+  try {
+    // Cheap idempotency: only insert if no existing unresolved
+    // LID-flag row for this conversation. (A resolved-then-flagged-
+    // again cycle is allowed because the owner might clear the flag
+    // and the same customer might message again with the same LID.)
+    const { data: existing } = await getSupabase()
+      .from('escalation_events')
+      .select('id')
+      .eq('conversation_id', conversationId)
+      .eq('reason', 'needs_review_lid_format')
+      .eq('resolved', false)
+      .maybeSingle();
+
+    if (existing) return;
+
+    const { error } = await getSupabase()
+      .from('escalation_events')
+      .insert({
+        conversation_id: conversationId,
+        reason: 'needs_review_lid_format',
+        // ai_draft_response captures the raw LID string so the owner
+        // can see WHICH identifier surfaced this flag when triaging.
+        ai_draft_response: `customer_phone=${rawPhone}`,
+      });
+
+    if (error) {
+      console.warn(
+        `[db.ts] markConversationNeedsReviewLid failed (conversation=${conversationId}):`,
+        error.message
+      );
+    }
+  } catch (e) {
+    console.warn(
+      `[db.ts] markConversationNeedsReviewLid threw (conversation=${conversationId}):`,
+      (e as Error).message
+    );
+  }
+}
+
+export async function updateCustomerNameIfMissing(
+  customerId: string,
+  candidateName: string | null | undefined
+): Promise<void> {
+  if (!candidateName) return;
+  const trimmed = candidateName.trim();
+  if (trimmed.length === 0) return;
+
+  // Reject obvious placeholders / non-names so we don't pollute the
+  // column with "unknown", "—", or a phone number accidentally pasted
+  // in. Anything that looks phone-shaped (>=8 digits, mostly digits)
+  // is treated as not-a-name.
+  const lower = trimmed.toLowerCase();
+  if (
+    lower === 'unknown' ||
+    lower === 'customer' ||
+    lower === '—' ||
+    lower === '-' ||
+    lower === 'n/a' ||
+    lower === 'null'
+  ) {
+    return;
+  }
+  const digitCount = (trimmed.match(/\d/g) ?? []).length;
+  if (digitCount >= 8) return;
+
+  // Conditional UPDATE — only flip name where it's currently NULL or
+  // empty. RLS-safe; the customer row's policy lets us update our own
+  // customer's name. If the row was concurrently updated by another
+  // turn, the .eq('name', '')'s filter simply no-ops, which is fine.
+  const { error } = await getSupabase()
+    .from('customers')
+    .update({ name: trimmed })
+    .eq('id', customerId)
+    .or('name.is.null,name.eq.');
+
+  if (error) {
+    // Non-fatal — name persistence is decoration on top of the reply
+    // path. A failure here should not break the customer's reply.
+    console.warn(
+      `[db.ts] updateCustomerNameIfMissing failed (customer=${customerId}):`,
+      error.message
+    );
+  }
+}
+
+export async function isAgentActive(businessId: string): Promise<boolean> {
+  const { data, error } = await getSupabase()
+    .from('businesses')
+    .select('agent_active')
+    .eq('id', businessId)
+    .maybeSingle();
+
+  if (error) {
+    console.warn(`[db.ts] isAgentActive lookup failed: ${error.message}`);
+    return true; // fail-open
+  }
+  if (!data) return true; // missing row → assume active
+  return data.agent_active !== false;
+}
+
+/**
  * Find an existing customer by phone, or create one.
  *
  * Race-safe: uses upsert so two concurrent requests for the same
@@ -139,40 +553,103 @@ export async function getOrCreateConversation(
 }
 
 /**
- * @deprecated No-op stub. Bot no longer writes raw messages to the
- * `messages` table. Use `updateConversationState()` instead — that
- * writes to `conversation_state`, which is now the source of truth
- * per `docs/SUPABASE_CHANGELOG.md` (2026-07-22).
+ * Append a single message row to the `messages` table.
  *
- * Kept as a no-op so existing callers (webhook.ts, demo.ts) don't
- * break during migration. Safe to delete once those callers are
- * fully migrated to updateConversationState().
+ * Story 18 — restores the chat transcript that the salon owner sees
+ * in /salon-portal/inbox, that superadmin reads cross-salon, and that
+ * any future usage/cost tracking will roll up from. Writes are
+ * best-effort: a failure is logged but never propagated, so a
+ * transient DB hiccup doesn't kill the customer's reply.
+ *
+ * The `messages` table is intentionally separate from
+ * `conversation_state` — state holds the STRUCTURED slots the LLM
+ * reasons over, messages hold the raw turn-by-turn chat log. They
+ * stay in sync because the same handler writes both.
  */
 export async function saveMessage(
   conversationId: string,
   senderType: SenderType,
   content: string
 ): Promise<void> {
-  console.warn(
-    '[saveMessage] deprecated no-op — conversation_state is now the source of truth (see docs/SUPABASE_CHANGELOG.md 2026-07-22)'
-  );
+  if (!content || content.trim().length === 0) return;
+  const { error } = await getSupabase()
+    .from('messages')
+    .insert({
+      conversation_id: conversationId,
+      sender_type: senderType,
+      content,
+    });
+  if (error) {
+    // Non-fatal — log + carry on. The bot's reply path must not fail
+    // because the transcript write failed.
+    console.warn(
+      `[db.ts] saveMessage failed (conversation=${conversationId} sender=${senderType}):`,
+      error.message
+    );
+  }
 }
 
 /**
- * @deprecated Returns []. Messages table no longer holds live data;
- * structured `conversation_state` is the source of truth. Use
- * `getConversationStateForPrompt()` instead, which returns a
- * formatted markdown block the bot includes in its system prompt.
+ * Return the most recent N turns of a conversation, ordered oldest-first.
  *
- * Kept as a no-op stub returning [] so existing callers don't
- * break during migration.
+ * Used by the LLM prompt to inject raw chat history into the bot's
+ * context — `conversation_state` carries structured slots, but for
+ * short back-and-forth the verbatim transcript is what the LLM
+ * actually needs to disambiguate pronouns, follow-ups, etc.
  */
 export async function getRecentMessages(
   conversationId: string,
   limit: number = 10
 ): Promise<Array<{ role: 'user' | 'assistant'; content: string }>> {
-  // Intentionally returns [] — see deprecation note above.
-  return [];
+  const { data, error } = await getSupabase()
+    .from('messages')
+    .select('sender_type, content, created_at')
+    .eq('conversation_id', conversationId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error || !data) {
+    console.warn(`[db.ts] getRecentMessages failed: ${error?.message}`);
+    return [];
+  }
+  // We selected newest-first; reverse so the prompt sees oldest-first.
+  return data.reverse().map((m) => ({
+    role: m.sender_type === 'customer' ? 'user' : 'assistant',
+    content: m.content,
+  }));
+}
+
+/**
+ * Return the FULL chronological thread for a conversation. Used by the
+ * owner-facing inbox view (Story 18) and any superadmin drill-in.
+ *
+ * RLS on the messages table already enforces that only the business
+ * owner / superadmin can read rows for their own conversations, so we
+ * don't add an extra ownership check here — the DB is the gate.
+ */
+export interface MessageRow {
+  id: string;
+  sender_type: SenderType;
+  content: string;
+  created_at: string;
+}
+
+export async function getMessageThread(
+  conversationId: string,
+  limit: number = 500
+): Promise<MessageRow[]> {
+  const { data, error } = await getSupabase()
+    .from('messages')
+    .select('id, sender_type, content, created_at')
+    .eq('conversation_id', conversationId)
+    .order('created_at', { ascending: true })
+    .limit(limit);
+
+  if (error) {
+    console.warn(`[db.ts] getMessageThread failed: ${error.message}`);
+    return [];
+  }
+  return (data ?? []) as MessageRow[];
 }
 
 /**
@@ -487,6 +964,21 @@ export interface SalonHours {
   close_time: string | null;
 }
 
+/**
+ * One-off salon closure (public holiday, owner vacation, etc.) that
+ * overrides the weekly hours for that specific date. Surfaced in the
+ * LLM system prompt so the bot can answer "open on 14 Aug?" questions
+ * correctly — otherwise the LLM hallucinates from weekly hours alone.
+ */
+export interface SalonHoliday {
+  /** ISO date YYYY-MM-DD in PKT. */
+  date: string;
+  /** Human-readable label the owner typed in the UI ("Azaadi day"). */
+  reason: string;
+  /** Raw enum bucket from the holidays table — useful for future filtering. */
+  reason_kind: string;
+}
+
 export interface SalonContext {
   business_id: string;
   name: string;
@@ -494,6 +986,15 @@ export interface SalonContext {
   timezone: string;
   services: SalonService[];
   hours: SalonHours[];
+  /** Upcoming one-off closures (date >= today, max 30). Owners set these
+   *  via the salon's "Holidays & Closures" tab. The LLM uses this list
+   *  to answer "is the salon open on X?" questions correctly — weekly
+   *  hours do NOT apply on closure dates. */
+  holidays: SalonHoliday[];
+  /** Active edge-case guardrails (platform-level + per-salon). The LLM
+   *  uses these to refuse out-of-scope asks (medical, refund, comparison)
+   *  consistently with the keyword detection in message-handler.ts. */
+  edge_case_rules: EdgeCaseRule[];
   staff_count: number;
   is_configured: boolean; // true if at least one service is loaded
   /** Current wall-clock time in Asia/Karachi as ISO-8601 with +05:00 offset.
@@ -546,6 +1047,8 @@ export async function getSalonContext(businessId: string): Promise<SalonContext>
     timezone: 'Asia/Karachi',
     services: [],
     hours: [],
+    holidays: [],
+    edge_case_rules: [],
     staff_count: 0,
     is_configured: false,
     current_datetime_pkt: currentDatetimePkt,
@@ -591,6 +1094,37 @@ export async function getSalonContext(businessId: string): Promise<SalonContext>
   if (hours) {
     ctx.hours = hours as SalonHours[];
   }
+
+  // Upcoming owner-set closures. Only future dates are useful for the
+  // LLM prompt — past closures are stale. Capped at 30 rows so a
+  // long-running salon can't bloat the prompt with old data.
+  const { data: holidays } = await getSupabase()
+    .from('holidays')
+    .select('date, reason, note')
+    .eq('business_id', businessId)
+    .gte('date', todayPkt)
+    .order('date', { ascending: true })
+    .limit(30);
+  if (holidays) {
+    ctx.holidays = (
+      holidays as Array<{ date: string; reason: string; note: string | null }>
+    ).map((h) => ({
+      date: h.date,
+      // Prefer the human-readable note (e.g. "Azaadi day") over the raw
+      // enum bucket. The UI always writes note=<text>, reason='other',
+      // so note is the source of truth for the customer-facing label.
+      reason: h.note || h.reason || 'closure',
+      reason_kind: h.reason,
+    }));
+  }
+
+  // Active edge-case guardrails (platform-level + per-salon). The LLM
+  // uses these to refuse out-of-scope asks (medical, refund, comparison)
+  // consistently with the keyword detection in message-handler.ts.
+  // Without this list the LLM has no idea what the salon's rules are
+  // and may give conflicting advice on, e.g., refund policy.
+  const edgeRules = await getEdgeCaseRules(businessId);
+  ctx.edge_case_rules = edgeRules;
 
   // Staff headcount (active only)
   const { count } = await getSupabase()
@@ -989,6 +1523,28 @@ async function isWithinBusinessHours(
   date: string,
   time: string
 ): Promise<{ ok: boolean; detail: string }> {
+  // Holiday check FIRST — closures win over weekly hours. If the
+  // requested date is on the owner's closure list, reject even when
+  // the weekly schedule has the salon marked "open". Cheap single-row
+  // lookup; the holidays table is small (single-digit rows per
+  // business) and indexed on (business_id, date).
+  const { data: holiday, error: holidayErr } = await getSupabase()
+    .from('holidays')
+    .select('note, reason')
+    .eq('business_id', businessId)
+    .eq('date', date)
+    .maybeSingle();
+  if (holidayErr) {
+    console.warn('[db.ts] holiday lookup failed (continuing):', holidayErr.message);
+  }
+  if (holiday) {
+    const label = holiday.note || holiday.reason || 'closure';
+    return {
+      ok: false,
+      detail: `Salon is closed on ${date} (${label})`,
+    };
+  }
+
   const dow = dayOfWeekFromIsoDate(date);
   if (!dow) return { ok: false, detail: 'Could not parse date' };
 
@@ -1655,18 +2211,61 @@ async function suggestAlternativeSlots(
 //   - 'customer_complaint'  — LLM intent='complaint'
 //   - 'low_confidence'      — LLM confidence < 30 and not 'book'/'cancel'/'reschedule'
 //   - 'customer_request_human' — LLM intent='other' but customer asked for a human
+//   - 'medical_concern'     — keyword/pattern match on health-adjacent phrasing
+//   - 'abusive_language'    — keyword/pattern match on abusive/threatening language
+//
+// Idempotency: this function is called on EVERY customer message turn
+// (the producer sits inside message-handler.ts:339-371). Without
+// dedupe, a customer who sends 5 angry messages in a row creates 5
+// separate rows for the same conversation. We mirror the pattern in
+// markConversationNeedsReviewLid() above: check for an existing
+// UNRESOLVED row of the SAME reason first, and if one exists, just
+// touch its timestamp + update the ai_draft_response. The Resolved
+// sub-tab picks the latest escalation per conversation anyway, so the
+// "touch" semantics keep the row at the top of the Active list while
+// preserving the original created_at for resolved-history sorting.
+//
+// A different reason always inserts a new row (e.g. a customer who
+// transitions from angry to medical-question creates both rows).
 // ---------------------------------------------------------------------------
 
 export type EscalationReason =
   | 'customer_complaint'
   | 'low_confidence'
-  | 'customer_request_human';
+  | 'customer_request_human'
+  | 'medical_concern'
+  | 'abusive_language';
 
 export async function recordEscalation(
   conversationId: string,
   reason: EscalationReason,
   aiDraftResponse: string | null
 ): Promise<void> {
+  // Cheap idempotency: only insert if no existing UNRESOLVED row of
+  // the SAME reason exists for this conversation. If one exists, just
+  // refresh it so the Active list shows it as fresh.
+  const { data: existing } = await getSupabase()
+    .from('escalation_events')
+    .select('id')
+    .eq('conversation_id', conversationId)
+    .eq('reason', reason)
+    .eq('resolved', false)
+    .maybeSingle();
+
+  if (existing) {
+    const { error } = await getSupabase()
+      .from('escalation_events')
+      .update({
+        ai_draft_response: aiDraftResponse,
+        created_at: new Date().toISOString(),
+      })
+      .eq('id', existing.id);
+    if (error) {
+      console.warn('[db.ts] recordEscalation touch failed:', error.message);
+    }
+    return;
+  }
+
   const { error } = await getSupabase()
     .from('escalation_events')
     .insert({

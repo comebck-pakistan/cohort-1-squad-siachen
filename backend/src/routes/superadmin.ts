@@ -28,6 +28,7 @@
 import { Router, Request, Response, RequestHandler } from 'express';
 import { getSupabase } from '../lib/supabase';
 import { requireAuth } from '../lib/auth';
+import { childLogger } from '../lib/logger';
 
 const router = Router();
 
@@ -55,6 +56,8 @@ const requireSuperadmin: RequestHandler = async (req, res, next) => {
 // Wrap (requireAuth, requireSuperadmin) as a single middleware array
 const authSuper = [requireAuth, requireSuperadmin] as const;
 
+const log = childLogger('superadmin');
+
 // ---------------------------------------------------------------------------
 // Business shape adapter: DB row → Recepta frontend's Business type
 // ---------------------------------------------------------------------------
@@ -70,6 +73,12 @@ interface BusinessRow {
   agent_active: boolean;
   created_at: string;
   owner_id?: string | null;
+  // Wave 7 (Phase 5) — trial lifecycle. NULL ends_at = pre-Wave-7 row,
+  // grandfathered as "no trial". Status defaults to 'active' from the
+  // migration's column default.
+  trial_status?: 'active' | 'expiring_soon' | 'expired' | 'converted';
+  trial_started_at?: string | null;
+  trial_ends_at?: string | null;
 }
 
 interface AdaptedBusiness {
@@ -82,6 +91,11 @@ interface AdaptedBusiness {
   city?: string;
   agent_active: boolean;
   created_at: string;
+  // Wave 7 (Phase 5) — trial lifecycle + computed days remaining.
+  trial_status?: 'active' | 'expiring_soon' | 'expired' | 'converted';
+  trial_started_at?: string | null;
+  trial_ends_at?: string | null;
+  days_remaining?: number | null;
   // Computed values (computed in GET /api/salons; absent on writes)
   messages_month?: number;
   mrr_pkr?: number;
@@ -91,6 +105,14 @@ function adaptBusiness(
   row: BusinessRow,
   extras: { messages_month?: number; mrr_pkr?: number } = {}
 ): AdaptedBusiness {
+  // Compute days_remaining server-side — saves the frontend from
+  // duplicating the timezone math. NULL endsAt → NULL days_remaining
+  // (pre-Wave-7 rows).
+  let days_remaining: number | null = null;
+  if (row.trial_ends_at) {
+    const ms = new Date(row.trial_ends_at).getTime() - Date.now();
+    days_remaining = Math.max(0, Math.ceil(ms / 86_400_000));
+  }
   return {
     id: row.id,
     name: row.name,
@@ -101,6 +123,10 @@ function adaptBusiness(
     city: row.city ?? undefined,
     agent_active: row.agent_active,
     created_at: row.created_at,
+    trial_status: row.trial_status,
+    trial_started_at: row.trial_started_at ?? null,
+    trial_ends_at: row.trial_ends_at ?? null,
+    days_remaining,
     ...extras,
   };
 }
@@ -169,7 +195,7 @@ router.get('/salons', ...authSuper, async (_req: Request, res: Response) => {
   const supabase = getSupabase();
   const { data, error } = await supabase
     .from('businesses')
-    .select('id, name, tier, phone_number_id, whatsapp_number, billing_state, city, agent_active, created_at, owner_id')
+    .select('id, name, tier, phone_number_id, whatsapp_number, billing_state, city, agent_active, created_at, owner_id, trial_status, trial_started_at, trial_ends_at')
     .order('created_at', { ascending: false });
 
   if (error) return res.status(500).json({ error: error.message });
@@ -181,6 +207,120 @@ router.get('/salons', ...authSuper, async (_req: Request, res: Response) => {
   );
   return res.json(adapted);
 });
+
+// ---------------------------------------------------------------------------
+// 1b. PATCH /api/salons/:id/trial/extend
+//
+// Wave 7 (Phase 5) — manual trial override. Pushes trial_ends_at forward
+// by `days` (1-365, validated) and resets trial_status to 'active' so
+// the cron job won't immediately re-flip to 'expired'. Used by the
+// superadmin SalonsTab "Extend +7 days" button.
+//
+// We do NOT touch billing_state — this is a courtesy extension, not a
+// conversion. To actually convert a salon to a paid customer, use the
+// /trial/convert endpoint below.
+// ---------------------------------------------------------------------------
+router.patch(
+  '/salons/:id/trial/extend',
+  ...authSuper,
+  async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const body = (req.body || {}) as { days?: unknown };
+    const days = Number(body.days);
+    if (!Number.isInteger(days) || days < 1 || days > 365) {
+      return res
+        .status(400)
+        .json({ error: 'days must be an integer between 1 and 365' });
+    }
+
+    const supabase = getSupabase();
+    // We used to call an RPC named extend_trial here, but that function
+    // was never installed in the DB and the dead-call path was triggering
+    // a 500 (the "function does not exist" regex didn't match PostgREST's
+    // actual "not found in schema cache" wording). The manual read+update
+    // below is the correct path and avoids the round-trip entirely.
+    //
+    // Logic: extend from the CURRENT trial_ends_at when it's still in the
+    // future; otherwise anchor to now() so a stale/expired row gets a fresh
+    // 7-day window. Always reset trial_status to 'active' so the cron job
+    // won't immediately re-flip to 'expired'.
+    const { data: existing } = await supabase
+      .from('businesses')
+      .select('trial_ends_at')
+      .eq('id', id)
+      .maybeSingle();
+    if (!existing) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+    const baseIso =
+      existing.trial_ends_at && new Date(existing.trial_ends_at) > new Date()
+        ? existing.trial_ends_at
+        : new Date().toISOString();
+    const newEnds = new Date(
+      new Date(baseIso).getTime() + days * 86400_000,
+    ).toISOString();
+    const { data: updated, error: updErr } = await supabase
+      .from('businesses')
+      .update({ trial_ends_at: newEnds, trial_status: 'active' })
+      .eq('id', id)
+      .select('id, trial_status, trial_ends_at')
+      .single();
+
+    if (updErr || !updated) {
+      log.error({ err: updErr, id }, 'extend-trial update failed');
+      return res
+        .status(500)
+        .json({ error: updErr?.message || 'extend failed' });
+    }
+    log.info(
+      { businessId: id, days, newEndsAt: newEnds },
+      'superadmin: extended trial',
+    );
+    return res.json({
+      ok: true,
+      business_id: updated.id,
+      trial_status: updated.trial_status,
+      trial_ends_at: updated.trial_ends_at,
+    });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// 1c. POST /api/salons/:id/trial/convert
+//
+// Wave 7 (Phase 5) — mark a trial as converted (paid). Sets trial_status
+// to 'converted' so the bot's short-circuit treats them as fully paid
+// (no trial enforcement). We do NOT clear trial_ends_at — leaving the
+// historical timestamp lets us audit "when did this user originally
+// sign up" if needed.
+// ---------------------------------------------------------------------------
+router.post(
+  '/salons/:id/trial/convert',
+  ...authSuper,
+  async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+      .from('businesses')
+      .update({ trial_status: 'converted' })
+      .eq('id', id)
+      .select('id, trial_status, trial_ends_at')
+      .single();
+    if (error || !data) {
+      log.error({ err: error, id }, 'convert-trial failed');
+      return res
+        .status(500)
+        .json({ error: error?.message || 'convert failed' });
+    }
+    log.info({ businessId: id }, 'superadmin: trial converted (paid)');
+    return res.json({
+      ok: true,
+      business_id: data.id,
+      trial_status: data.trial_status,
+      trial_ends_at: data.trial_ends_at,
+    });
+  }
+);
 
 // ---------------------------------------------------------------------------
 // 2. POST /api/salons

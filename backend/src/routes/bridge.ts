@@ -52,10 +52,27 @@ function requireBridgeToken(req: Request, res: Response): boolean {
 router.get('/bridge/active-businesses', async (req, res) => {
   if (!requireBridgeToken(req, res)) return;
 
+  // Wave 7 hardening (Option 1) — don't hand the bridge a session for an
+  // expired salon. The bridge trusts this list to bootstrap WhatsAppWebClient
+  // instances; if we returned an expired salon's id, the bridge would
+  // (a) restore its LocalAuth from disk, (b) re-authenticate against the
+  // WhatsApp account, and (c) start firing message events for messages that
+  // should be going to the trial-ended fallback path in the core API.
+  //
+  // This is the boot-time half of the fix. The live-time half lives in
+  // jobs/trial-expiry.ts — when the cron flips a salon's status to
+  // 'expired', it also calls DELETE /onboarding/:id/session on the bridge
+  // to tear down any session that's already alive. Together they close the
+  // gap that allowed duplicate bot replies during Wave 7 testing.
+  //
+  // `converted` is in the IN list — paid customers must keep their bot.
+  // Pre-Wave-7 rows have trial_status='active' (migration 17 default),
+  // so they pass through unchanged.
   const { data, error } = await getSupabase()
     .from('businesses')
     .select('id')
-    .eq('agent_active', true);
+    .eq('agent_active', true)
+    .in('trial_status', ['active', 'expiring_soon', 'converted']);
 
   if (error) {
     log.error({ err: error.message }, 'failed to load active businesses');

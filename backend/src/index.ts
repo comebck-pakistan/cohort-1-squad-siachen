@@ -17,8 +17,11 @@ import dashboardRouter from './routes/dashboard';
 import superadminRouter from './routes/superadmin';
 import onboardingRouter from './routes/onboarding';
 import bridgeRouter from './routes/bridge';
-import publicOnboardingRouter from './routes/public-onboarding';
+import freeTrialSignupRouter from './routes/free-trial-signup';
+import waitlistRouter from './routes/waitlist';
 import { logger, childLogger } from './lib/logger';
+import { startTrialExpiryJob } from './jobs/trial-expiry';
+import { stopAllJobs } from './lib/scheduler';
 
 // ---------------------------------------------------------------------------
 // Halo backend entry point.
@@ -90,7 +93,7 @@ app.use(
     },
     credentials: true,
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   })
 );
 app.use(express.json({ limit: '15mb' }));
@@ -128,7 +131,9 @@ app.use('/api', superadminRouter);
 // becomes reachable. Used by bridge/src/bridge-client.ts for active-businesses
 // discovery and inbound-message delivery.
 app.use('/api', bridgeRouter);
-app.use('/api', publicOnboardingRouter);
+app.use('/api', freeTrialSignupRouter);
+// Wave 8 — landing-page waitlist capture. Public POST endpoint, no auth.
+app.use('/api', waitlistRouter);
 // Onboarding proxy — /onboarding/:id/* is forwarded to the bridge service
 // (Phase 1). Mounted at root because the path is part of the URL space shared
 // with the bridge's own QR server.
@@ -163,6 +168,14 @@ if (TRANSPORT === 'web') {
 
 const server = app.listen(PORT, () => {
   log.info({ port: PORT, transport: TRANSPORT }, 'halo backend listening');
+
+  // Wave 7 (Phase 4) — start the trial-expiry scheduled job. Hourly:
+  // (a) WhatsApp-warn owners whose trial ends in 0-2 days, flip to
+  //     'expiring_soon'.
+  // (b) Flip any trial whose trial_ends_at has passed to 'expired'.
+  // The job lives in lib/jobs/trial-expiry.ts; see lib/scheduler.ts for
+  // the small registry that ticks it.
+  startTrialExpiryJob();
 });
 
 // ---------------------------------------------------------------------------
@@ -203,6 +216,10 @@ async function shutdown(signal: string, exitCode = 0): Promise<void> {
       resolve();
     });
   });
+
+  // Wave 7 (Phase 4) — stop the trial-expiry job so in-flight ticks
+  // don't outlive the process. Safe to call even if no jobs registered.
+  stopAllJobs();
 
   clearTimeout(forceTimer);
   log.info({ signal }, 'shutdown complete');

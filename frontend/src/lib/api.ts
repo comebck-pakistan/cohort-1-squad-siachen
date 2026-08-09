@@ -56,6 +56,18 @@ export interface NextAppointment {
   staff_name: string | null;
 }
 
+/**
+ * Story 18 — single row from the conversation thread endpoint.
+ * `sender_type` matches the `message_sender` Postgres enum:
+ *   'customer' | 'agent' | 'owner'
+ */
+export interface ConversationMessage {
+  id: string;
+  sender_type: "customer" | "agent" | "owner";
+  content: string;
+  created_at: string;
+}
+
 export interface EscalationRow {
   id: string;
   conversation_id: string;
@@ -404,7 +416,43 @@ export const api = {
       status: "qr_ready",
       hasQR: true,
       qr: null,
+      pairing_method: "qr",
+      pairing_code: null,
     })),
+  /**
+   * Switch an already-registered salon into phone-pairing mode.
+   * Returns the first 8-char pairing code the bridge generated. The
+   * library auto-rotates every ~3 min; the modal picks up new codes
+   * from the next /status poll.
+   *
+   * Errors surfaced to caller:
+   *   400 — phoneNumber missing or wrong format
+   *   404 — no client registered (must call /register first)
+   *   409 — chromium still initializing (poll /status, retry)
+   *   500 — library/puppeteer error from the bridge
+   */
+  pairWithPhone: (
+    businessId: string,
+    phoneNumber: string
+  ): Promise<{
+    businessId: string;
+    pairing_method: "phone";
+    pairing_code: string;
+    status: "code_pending";
+  }> =>
+    withMock(
+      `/onboarding/${businessId}/pair-with-phone`,
+      () => ({
+        businessId,
+        pairing_method: "phone" as const,
+        pairing_code: "MOCK1234",
+        status: "code_pending" as const,
+      }),
+      {
+        method: "POST",
+        body: JSON.stringify({ phoneNumber }),
+      }
+    ),
   connectionInfo: (businessId: string) =>
     withMock(`/api/business/${businessId}/connection-info`, () => ({
       businessId,
@@ -421,6 +469,83 @@ export const api = {
     }),
   onboardingPageUrl: (businessId: string) =>
     `${BASE_URL}/onboarding/${businessId}`,
+
+  // ---- Wave 6 — free-trial signup ----------------------------------------
+
+  /**
+   * One-shot signup for the /onboarding wizard. Backend creates the Supabase
+   * auth user, profile (via trigger), businesses row, and N service rows in
+   * a single POST. Returns `{ businessId, email }` on 201.
+   *
+   * Errors surfaced to caller:
+   *   400 — validation (missing field, weak password, etc.)
+   *   409 — email already registered (`code: "EMAIL_TAKEN"`)
+   *   500 — backend failure (auth user was compensated via deleteUser)
+   *
+   * The wizard does NOT auto-login after this call — it navigates to
+   * `/login?from=signup` so the owner signs in with the password they
+   * just set (more explicit, matches existing /login UX).
+   *
+   * The withMock fallback returns a fake UUID so the dev preview keeps
+   * working without a backend. In a real backend run, errors here are
+   * logged via `withMock`'s `console.error` and never silently swallowed.
+   */
+  freeTrialSignup: (payload: {
+    salonName: string;
+    salonType:
+      | "Hair Salon"
+      | "Nail Bar"
+      | "MedSpa"
+      | "Barbershop"
+      | "Lash & Brow Studio";
+    city: string;
+    email: string;
+    password: string;
+    /** E.164-ish digits of the salon's WhatsApp line (e.g. "923001234567").
+     *  Sent through to businesses.whatsapp_number so the dashboard can show
+     *  it without a second round-trip. */
+    whatsappNumber: string;
+    services: Array<{
+      name: string;
+      duration_minutes: number;
+      price?: number;
+      category?: string;
+    }>;
+  }) =>
+    withMock<{ businessId: string; email: string }>(
+      "/api/onboarding/free-trial-signup",
+      () => ({
+        businessId: `mock-${crypto.randomUUID()}`,
+        email: payload.email,
+      }),
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
+
+  /**
+   * Wave 8 — landing-page waitlist capture. Public POST, no auth, no
+   * withMock fallback for dev because the form should never appear to
+   * "succeed" without the backend. Returns a lead id on 201. The
+   * backend persists to public.waitlist_leads.
+   */
+  waitlistSignup: (payload: {
+    name: string;
+    salonName: string;
+    /** Normalized digits (10-15 chars, no +/spaces) — same shape the
+     *  backend's `validate()` produces from raw input. */
+    phone: string;
+    email: string;
+    salonType?:
+      | "Hair Salon"
+      | "Nail Bar"
+      | "MedSpa"
+      | "Barbershop"
+      | "Lash & Brow Studio";
+  }) =>
+    withMock<{ leadId: string }>(
+      "/api/waitlist",
+      () => ({ leadId: `mock-${crypto.randomUUID()}` }),
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
 
   // ---- Phase 1 dashboard wiring (round-trip data) -----------------------
 
@@ -444,6 +569,179 @@ export const api = {
         next_appointment: NextAppointment | null;
       }>,
     })),
+
+  /**
+   * Story 18 — full chronological thread for one conversation. Used by
+   * the inbox detail panel to render every customer/agent/owner turn.
+   * Returns [] on backend error rather than throwing, so a transient
+   * failure doesn't blow away the conversation list.
+   */
+  conversationMessages: (conversationId: string) =>
+    withMock<{
+      conversationId: string;
+      messages: ConversationMessage[];
+    }>(`/api/conversations/${conversationId}/messages`, () => ({
+      conversationId,
+      messages: [] as ConversationMessage[],
+    })),
+
+  /**
+   * Wave 2 — owner clicks "Mark Resolved" on an escalation. Flips
+   * escalation_events.resolved=true; the conversation drops out of
+   * the Active sub-tab automatically on the next refresh.
+   */
+  resolveEscalation: (escalationId: string) =>
+    withMock<{ id: string; resolved: boolean; alreadyResolved?: boolean }>(
+      `/api/escalations/${escalationId}/resolve`,
+      () => ({ id: escalationId, resolved: true }),
+      { method: "POST" },
+    ),
+
+  /**
+   * Wave 2 — owner-driven manual send. The backend persists the owner
+   * turn to messages FIRST, then proxies the actual WhatsApp send to
+   * the bridge. Returns sentToBridge=false when the bridge is down —
+   * the messages row is still saved, so the owner can re-send.
+   */
+  ownerReply: (
+    conversationId: string,
+    text: string,
+  ) =>
+    withMock<{
+      ok: boolean;
+      sentToBridge: boolean;
+      messageId: string | null;
+    }>(
+      `/api/conversations/${conversationId}/owner-reply`,
+      () => ({ ok: false, sentToBridge: false, messageId: null }),
+      { method: "POST", body: JSON.stringify({ text }) },
+    ),
+
+  /**
+   * Wave 2 — Resolved sub-tab. Returns conversations whose latest
+   * escalation has resolved=true (sorted by resolved_at desc). Same
+   * row shape as the active list endpoint so the existing renderer
+   * works unchanged.
+   */
+  resolvedEscalations: (businessId: string) =>
+    withMock<{
+      conversations: Array<{
+        id: string;
+        status: string;
+        last_message_at: string;
+        customer: { id: string; name: string | null; phone: string | null };
+        state: {
+          current_intent: string | null;
+          last_customer_msg: string | null;
+          last_agent_msg: string | null;
+          outcome: string | null;
+        };
+        /** ISO timestamp from escalation_events.resolved_at — drives
+         *  the row's "Resolved Xh ago" display label. */
+        resolved_at: string | null;
+        next_appointment: unknown | null;
+      }>;
+    }>(`/api/business/${businessId}/resolved-escalations`, () => ({
+      conversations: [],
+    })),
+
+  /**
+   * Story 13 — owner-side kill switch. Flips the salon's agent_active
+   * column. Distinct from setAgentActive() (which is superadmin-only —
+   * hits /api/salons/:id/agent). When active=false the backend stops
+   * the bot from replying, but customer messages are still persisted
+   * to the messages table so the owner can read them in the inbox.
+   */
+  setMyAgentActive: (businessId: string, active: boolean) =>
+    withMock<{ id: string; agent_active: boolean }>(
+      `/api/business/${businessId}/agent-active`,
+      () => ({ id: businessId, agent_active: active }),
+      {
+        method: "PATCH",
+        body: JSON.stringify({ agent_active: active }),
+      },
+    ),
+
+  /**
+   * Story 13 — read the owner's current agent_active state. Used by
+   * the toggle to render its initial state without pulling the full
+   * business row.
+   */
+  getMyAgentActive: (businessId: string) =>
+    withMock<{ id: string; agent_active: boolean }>(
+      `/api/business/${businessId}/agent-active`,
+      () => ({ id: businessId, agent_active: true }),
+    ),
+
+  // ---- Wave 7 — trial status (dashboard banner + agent-action gates) ------
+
+  /**
+   * Wave 7 — fetch the current trial status for the owner's salon. Used
+   * by TenantShell (banner), AgentToggle (disable when expired), and
+   * the owner-reply Send button (disable when expired).
+   *
+   * React Query handles dedup — every component that needs this fetches
+   * with the same query key, and only one network request fires.
+   */
+  myTrialStatus: (businessId: string) =>
+    withMock<{
+      businessId: string;
+      trial_status: "active" | "expiring_soon" | "expired" | "converted";
+      trial_started_at: string | null;
+      trial_ends_at: string | null;
+      days_remaining: number | null;
+      is_expired: boolean;
+    }>(
+      `/api/business/${businessId}/trial`,
+      () => ({
+        businessId,
+        trial_status: "active" as const,
+        trial_started_at: null,
+        trial_ends_at: null,
+        days_remaining: null,
+        is_expired: false,
+      }),
+    ),
+
+  // ---- Wave 7 — superadmin trial override actions ------------------------
+
+  /**
+   * Extend a salon's trial by `days` (1-365). Resets trial_status='active'
+   * and pushes trial_ends_at forward. Used by the SalonsTab "Extend +7 days"
+   * button for early-conversion / hand-holding outreach.
+   */
+  extendTrial: (salonId: string, days: number) =>
+    withMock<{
+      ok: boolean;
+      business_id?: string;
+      trial_status?: string;
+      trial_ends_at?: string;
+    }>(
+      `/api/salons/${salonId}/trial/extend`,
+      () => ({
+        ok: true,
+        business_id: salonId,
+        trial_status: "active",
+        trial_ends_at: new Date(Date.now() + days * 86400_000).toISOString(),
+      }),
+      { method: "PATCH", body: JSON.stringify({ days }) },
+    ),
+
+  /**
+   * Mark a salon's trial as 'converted' (paid). After this, the bot's
+   * short-circuit ignores the trial clock and resumes normal replies.
+   */
+  convertTrial: (salonId: string) =>
+    withMock<{
+      ok: boolean;
+      business_id?: string;
+      trial_status?: string;
+      trial_ends_at?: string;
+    }>(
+      `/api/salons/${salonId}/trial/convert`,
+      () => ({ ok: true, business_id: salonId, trial_status: "converted" }),
+      { method: "POST" },
+    ),
 
   services: (businessId: string) =>
     withMock(`/api/business/${businessId}/services`, () => ({
@@ -579,11 +877,11 @@ export const api = {
       { method: "PATCH", body: JSON.stringify({ service_ids: serviceIds }) },
     ),
 
-  /** Patch an appointment — confirm/cancel/reschedule. */
+  /** Patch an appointment — confirm/cancel/reschedule/no-show. */
   patchAppointment: (
     appointmentId: string,
     body: {
-      status?: "pending" | "confirmed" | "completed" | "cancelled";
+      status?: "pending" | "confirmed" | "completed" | "cancelled" | "no_show";
       start_time?: string;
       end_time?: string;
     },
@@ -646,6 +944,91 @@ export const api = {
       () => body,
       { method: "PUT", body: JSON.stringify(body) },
     ),
+
+  // ---- Wave 3 — working hours CRUD ---------------------------------------
+
+  /**
+   * Weekly schedule for a salon. The 7 rows from business_hours
+   * (day_of_week: 'mon'..'sun'), used to populate the Operating Hours
+   * tab on first render. Owner edits accumulate in local state and are
+   * persisted via saveBusinessHours() when "Save Changes" is clicked.
+   */
+  businessHours: (businessId: string) =>
+    withMock(`/api/business/${businessId}/hours`, () => ({
+      hours: [] as Array<{
+        day_of_week: string;
+        is_open: boolean;
+        open_time: string | null;
+        close_time: string | null;
+      }>,
+    })),
+
+  /**
+   * Persist all 7 weekly hours rows in one PUT. Backend uses
+   * onConflict='business_id,day_of_week' so this is a true upsert —
+   * no row is dropped, no race window.
+   */
+  saveBusinessHours: (
+    businessId: string,
+    hours: Array<{
+      day_of_week: string;
+      is_open: boolean;
+      open_time: string | null;
+      close_time: string | null;
+    }>,
+  ) =>
+    withMock<{ hours: typeof hours }>(
+      `/api/business/${businessId}/hours`,
+      () => ({ hours }),
+      { method: "PUT", body: JSON.stringify({ hours }) },
+    ),
+
+  // ---- Wave 3 — holidays / closures CRUD ---------------------------------
+
+  /**
+   * Closure dates the salon owner has flagged (Eid, Independence Day,
+   * maintenance days, etc.). The bot's booking layer rejects any
+   * attempt to book a slot on these dates — see db.ts:isWithinBusinessHours.
+   */
+  holidays: (businessId: string) =>
+    withMock(`/api/business/${businessId}/holidays`, () => ({
+      holidays: [] as Array<{
+        id: string;
+        date: string;
+        reason: string;
+        reason_kind: string;
+      }>,
+    })),
+
+  /** Add a single closure date. UI supplies free-text `reason`; the
+   *  backend stores it in the `note` column and writes `reason='other'`
+   *  to the enum. */
+  addHoliday: (
+    businessId: string,
+    body: { date: string; reason: string },
+  ) =>
+    withMock<{
+      holiday: { id: string; date: string; reason: string; reason_kind: string };
+    }>(
+      `/api/business/${businessId}/holidays`,
+      () => ({
+        holiday: {
+          id: crypto.randomUUID(),
+          date: body.date,
+          reason: body.reason,
+          reason_kind: "other",
+        },
+      }),
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  /** Delete a single closure date by id. */
+  deleteHoliday: (businessId: string, holidayId: string) =>
+    withMock<{ id: string }>(
+      `/api/business/${businessId}/holidays/${holidayId}`,
+      () => ({ id: holidayId }),
+      { method: "DELETE" },
+    ),
 };
 
 export const qk = {
@@ -659,10 +1042,20 @@ export const qk = {
   onboarding: (id: string) => ["onboarding", id] as const,
   staff: (id: string) => ["staff", id] as const,
   conversations: (id: string) => ["conversations", id] as const,
+  conversationMessages: (id: string) =>
+    ["conversations", id, "messages"] as const,
+  resolvedEscalations: (id: string) =>
+    ["resolved-escalations", id] as const,
+  myAgentActive: (id: string) =>
+    ["agent-active", id] as const,
+  myTrialStatus: (id: string) =>
+    ["trial-status", id] as const,
   services: (id: string) => ["services", id] as const,
   dashboardStats: (id: string) => ["dashboard-stats", id] as const,
   escalations: (id: string) => ["escalations", id] as const,
   aiRules: (id: string) => ["ai-rules", id] as const,
+  businessHours: (id: string) => ["business-hours", id] as const,
+  holidays: (id: string) => ["holidays", id] as const,
   businessToday: (id: string) => ["bookings", "today", id] as const,
   businessBookings: (id: string, date: string) =>
     ["bookings", "date", id, date] as const,

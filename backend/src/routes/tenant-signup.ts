@@ -1,4 +1,22 @@
 // ---------------------------------------------------------------------------
+// @deprecated — REPLACED by `routes/free-trial-signup.ts` in Wave 6 (Phase 1).
+//
+// Kept on disk for audit history. NOT MOUNTED in `backend/src/index.ts`.
+// Do NOT add an import here — the new endpoint at
+//   POST /api/onboarding/free-trial-signup
+// handles all trial-signup flows.
+//
+// The frontend's `/onboarding` wizard previously called
+//   POST /api/auth/signup-tenant
+// which always 404'd because this router was orphaned. The new wizard
+// uses the live `free-trial-signup` endpoint instead.
+//
+// Why this file is preserved: it documents the original design intent
+// (startup catalog, default hours seed) that may be useful when we
+// reintroduce tier-specific starter catalogs in Phase 2.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // Tenant signup + starter-catalog.
 //
 // Designed for the Recepta onboarding flow: a brand-new salon owner fills

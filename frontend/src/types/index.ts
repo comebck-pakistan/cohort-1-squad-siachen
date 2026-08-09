@@ -1,6 +1,15 @@
 export type Tier = "basic" | "pro" | "business";
 export type BillingStatus = "active" | "grace_period" | "suspended";
 
+/**
+ * Wave 7 (Phase 1) — 7-day trial lifecycle.
+ *   active       — trial running, bot replies normally
+ *   expiring_soon — day 5–7, warning WhatsApp already sent to owner
+ *   expired      — day 7+, bot sends fixed fallback, dashboard banner shown
+ *   converted    — paid customer, no trial enforcement
+ */
+export type TrialStatus = "active" | "expiring_soon" | "expired" | "converted";
+
 export interface Business {
   id: string;
   name: string;
@@ -13,6 +22,13 @@ export interface Business {
   mrr_pkr?: number;
   agent_active?: boolean;
   created_at: string;
+  /** Wave 7. Optional — null for pre-Wave-7 salons (grandfathered as
+   *  "no trial"; bot enforcement treats null endsAt as no expiry). */
+  trial_status?: TrialStatus;
+  trial_started_at?: string | null;
+  trial_ends_at?: string | null;
+  /** Server-computed; null for pre-Wave-7 rows (grandfathered). */
+  days_remaining?: number | null;
 }
 
 export interface HandleResult {
@@ -65,10 +81,30 @@ export interface SafetyRules {
 
 export interface OnboardingStatus {
   businessId: string;
-  status: "qr_ready" | "ready" | "initializing" | "not_found";
+  status:
+    | "initializing"
+    | "qr_pending"
+    | "qr_ready"
+    | "code_pending"
+    | "authenticated"
+    | "ready"
+    | "disconnected"
+    | "expired"
+    | "destroyed"
+    | "not_found";
   hasQR: boolean;
-  /** Raw QR string from whatsapp-web bridge. Encode with qrcode.react. */
+  /** Raw QR string from whatsapp-web bridge. Encode with qrcode.react.
+   *  Always null when pairing_method === 'phone' — phone mode clears
+   *  the QR holder on the bridge side. */
   qr: string | null;
+  /** Which pairing handshake the salon owner picked. 'qr' (default,
+   *  scans an image) or 'phone' (types an 8-char code under
+   *  Settings → Linked Devices). null when no client is registered. */
+  pairing_method: "qr" | "phone" | null;
+  /** Raw 8-char pairing code from the library, no dashes
+   *  (e.g. "ABCDEFGH"). Modal formats as XXXX-XXXX for display.
+   *  Only populated when status === 'code_pending'. */
+  pairing_code: string | null;
 }
 
 export interface CreateSalonInput {

@@ -14,7 +14,13 @@
 //   POST   /api/business/:businessId/services
 //   GET    /api/business/:businessId/services            (Phase 1 dashboard wiring)
 //   GET    /api/business/:businessId/conversations
+//   GET    /api/conversations/:conversationId/messages   (Story 18)
+//   PATCH  /api/business/:businessId/agent-active        (Story 13 — owner pause)
+//   GET    /api/business/:businessId/agent-active        (Story 13 — owner read)
 //   GET    /api/business/:businessId/escalations         (Phase 1 dashboard wiring)
+//   POST   /api/escalations/:escalationId/resolve        (Wave 2 — owner marks done)
+//   POST   /api/conversations/:conversationId/owner-reply (Wave 2 — owner manual send)
+//   GET    /api/business/:businessId/resolved-escalations (Wave 2 — Resolved sub-tab)
 //   GET    /api/business/:businessId/dashboard-stats     (Phase 1 dashboard wiring)
 //   GET    /api/business/:businessId/ai-rules            (Phase 1 dashboard wiring)
 //   PUT    /api/business/:businessId/ai-rules            (Phase 1 dashboard wiring)
@@ -24,12 +30,30 @@
 // ---------------------------------------------------------------------------
 
 import { Router, Request, Response } from 'express';
+import axios, { AxiosError, Method } from 'axios';
 import { getSupabase } from '../lib/supabase';
 import { requireAuth, requireOwnedBusiness } from '../lib/auth';
+import {
+  getMessageThread,
+  saveMessage,
+  touchConversation,
+  updateConversationState,
+} from '../lib/db';
+import { childLogger } from '../lib/logger';
+import { getTrialInfo } from '../lib/trial';
+import { bridgeSend } from '../lib/bridge-send';
 
 const router = Router();
 const auth = [requireAuth] as const;
 const owned = (param: string) => [requireAuth, requireOwnedBusiness(param)] as const;
+
+// Bridge config — same values the onboarding proxy uses (see
+// routes/onboarding.ts). Kept local rather than imported because the
+// onboarding module wraps axios differently; both sides read the
+// same env vars so the URLs always line up.
+const BRIDGE_URL = process.env.BRIDGE_URL || 'http://localhost:3100';
+const BRIDGE_TOKEN = process.env.BRIDGE_INTERNAL_TOKEN || '';
+const log = childLogger('route.dashboard');
 
 // ---------------------------------------------------------------------------
 // 1. GET /api/business/:businessId/today
@@ -446,10 +470,17 @@ router.patch(
 
 // ---------------------------------------------------------------------------
 // 7. GET /api/business/:businessId/conversations
-//    List recent conversations with last message preview + (when present)
-//    the customer's NEXT upcoming appointment. The next_appointment join
-//    unlocks the Inbox "Confirm Appointment in System" quick-action —
-//    owner can confirm without a separate lookup.
+//    List recent ESCALATIONS — conversations that need human attention.
+//    Per the 2026-08-07 redesign, the inbox tab only shows:
+//      (a) conversations with an unresolved escalation_events row, OR
+//      (b) conversations with status='human_takeover' (owner clicked
+//          Take Over Chat without an explicit LLM escalation).
+//    Resolved escalations disappear from this view; data is preserved
+//    in escalation_events if we want a "history" view later.
+//    Each row carries last message preview + the customer's next
+//    upcoming appointment (single query, no N+1) — same shape as
+//    before so the frontend doesn't need a separate type for "regular"
+//    vs "escalation" conversations.
 // ---------------------------------------------------------------------------
 router.get(
   '/business/:businessId/conversations',
@@ -458,6 +489,87 @@ router.get(
     const { businessId } = req.params;
     const limit = Math.min(parseInt((req.query.limit as string) || '50', 10), 200);
     const supabase = getSupabase();
+
+    // Step A: collect the conversation ids we want to show. Two paths:
+    //   1. Unresolved escalations (any reason — complaint, low_confidence,
+    //      customer_request_human, or the LID needs_review flag from
+    //      message-handler). resolved=false is the gate. Scoped via
+    //      conversations!inner(business_id) because the service-role
+    //      client bypasses RLS, so we have to filter manually to avoid
+    //      leaking another salon's escalations to this owner.
+    //   2. Manually taken-over conversations (no formal escalation but
+    //      the owner clicked Take Over Chat). Already business-scoped.
+    const [escRes, takeoverRes] = await Promise.all([
+      supabase
+        .from('escalation_events')
+        .select('id, conversation_id, created_at, reason, conversations!inner(business_id)')
+        .eq('resolved', false)
+        .eq('conversations.business_id', businessId),
+      supabase
+        .from('conversations')
+        .select('id')
+        .eq('business_id', businessId)
+        .eq('status', 'human_takeover'),
+    ]);
+
+    // Union the ids, dedup. If either query errors we treat that
+    // source as empty rather than failing the whole endpoint — the
+    // Escalations tab is decoration on top of the reply path.
+    // Also capture the latest (most-recently-created) escalation id
+    // + reason per conversation so the Mark Resolved button has a
+    // target AND the UI can show the right badge ("Medical concern"
+    // / "Complaint" / "Wants human" instead of just "Booking Request"
+    // from the LLM's inferred intent). Since we only fetched
+    // unresolved rows above, "latest" is just the most-recently-
+    // created one per conversation in this set.
+    const idSet = new Set<string>();
+    const latestEscByConv = new Map<
+      string,
+      { id: string; created_at: string; reason: string | null }
+    >();
+    if (!escRes.error) {
+      for (const e of escRes.data || []) {
+        if (!e.conversation_id) continue;
+        idSet.add(e.conversation_id);
+        // The PostgREST SELECT shape for the joined row is loose;
+        // grab the id off whatever field has it.
+        const escId = (e as unknown as { id?: string }).id;
+        const created = (e as unknown as { created_at?: string }).created_at;
+        const reason = (e as unknown as { reason?: string }).reason ?? null;
+        if (!escId || !created) continue;
+        const existing = latestEscByConv.get(e.conversation_id);
+        if (!existing || created > existing.created_at) {
+          latestEscByConv.set(e.conversation_id, {
+            id: escId,
+            created_at: created,
+            reason,
+          });
+        }
+      }
+    } else {
+      console.warn(
+        '[dashboard] escalation_events lookup failed:',
+        escRes.error.message
+      );
+    }
+    if (!takeoverRes.error) {
+      for (const c of takeoverRes.data || []) {
+        if (c.id) idSet.add(c.id);
+      }
+    } else {
+      console.warn(
+        '[dashboard] human_takeover conversations lookup failed:',
+        takeoverRes.error.message
+      );
+    }
+
+    // Nothing escalated, nothing taken over — return empty list
+    // immediately. Avoids the second query entirely.
+    if (idSet.size === 0) {
+      return res.json({ conversations: [] });
+    }
+
+    const wantedIds = Array.from(idSet);
 
     const { data, error } = await supabase
       .from('conversations')
@@ -469,6 +581,7 @@ router.get(
         )
       `)
       .eq('business_id', businessId)
+      .in('id', wantedIds)
       .order('last_message_at', { ascending: false })
       .limit(limit);
 
@@ -514,13 +627,593 @@ router.get(
       // Supabase joins can resolve as object OR as a one-element array.
       const custRecord = Array.isArray(c.customer) ? c.customer[0] : c.customer;
       const custId = custRecord?.id;
+      const esc = latestEscByConv.get(c.id);
       return {
         ...c,
         next_appointment: custId ? nextByCustomer.get(custId) || null : null,
+        // Surface the latest unresolved escalation id so the
+        // frontend's "Mark Resolved" button has a target. null for
+        // conversations in the queue purely via human_takeover.
+        latest_escalation_id: esc?.id ?? null,
+        // Surface the latest escalation REASON so the frontend can
+        // render the right badge label ("Medical concern" / "Complaint"
+        // / "Wants human") instead of relying on the LLM's
+        // conversation_state.current_intent, which is usually 'book'
+        // and would always render as "Booking Request" — wrong for
+        // safety/compliance escalations. null for human_takeover-only
+        // conversations.
+        latest_escalation_reason: esc?.reason ?? null,
       };
     });
 
     return res.json({ conversations: decorated });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// 7a-bis. GET /api/business/:businessId/resolved-escalations
+//
+// Resolved sub-tab inside the Escalations view. Returns the rows
+// whose LATEST escalation_event is resolved=true, ordered by
+// resolved_at desc (most recently resolved first).
+//
+// Same row shape as /conversations (so the frontend renderer is
+// identical), plus a `resolved_at` field for the row's "Resolved
+// 3h ago" label.
+//
+// Implementation note: we query the LATEST escalation row per
+// conversation via a window function (DISTINCT ON in Postgres lingo)
+// so we don't double-count a conversation that was resolved, then
+// re-escalated, then resolved again.
+// ---------------------------------------------------------------------------
+router.get(
+  '/business/:businessId/resolved-escalations',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const limit = Math.min(parseInt((req.query.limit as string) || '50', 10), 200);
+    const supabase = getSupabase();
+
+    // Step 1: find the conversation_ids whose latest escalation is
+    // resolved=true. We grab all escalations for this business,
+    // then pick the latest per conversation in JS (cheaper than
+    // wiring a separate view). Resulting size is bounded by the
+    // escalations per business, which is the same order of magnitude
+    // as the active list.
+    const { data: allEsc, error: escErr } = await supabase
+      .from('escalation_events')
+      .select(
+        'id, conversation_id, resolved, resolved_at, created_at, conversations!inner(business_id)'
+      )
+      .eq('conversations.business_id', businessId);
+
+    if (escErr) {
+      return res.status(500).json({ error: escErr.message });
+    }
+
+    // Pick the latest escalation per conversation_id. Only include
+    // a conversation if that latest is resolved=true.
+    const latestByConv = new Map<
+      string,
+      { id: string; resolved: boolean; resolved_at: string | null; created_at: string }
+    >();
+    for (const e of allEsc || []) {
+      const existing = latestByConv.get(e.conversation_id);
+      const created = e.created_at;
+      if (!existing || created > existing.created_at) {
+        latestByConv.set(e.conversation_id, {
+          id: e.id,
+          resolved: e.resolved,
+          resolved_at: e.resolved_at,
+          created_at: created,
+        });
+      }
+    }
+    const resolvedConvIds: string[] = [];
+    const resolvedAtByConv = new Map<string, string | null>();
+    const escalationIdByConv = new Map<string, string>();
+    for (const [convId, latest] of latestByConv) {
+      if (latest.resolved) {
+        resolvedConvIds.push(convId);
+        resolvedAtByConv.set(convId, latest.resolved_at);
+        escalationIdByConv.set(convId, latest.id);
+      }
+    }
+
+    if (resolvedConvIds.length === 0) {
+      return res.json({ conversations: [] });
+    }
+
+    // Step 2: load the conversation rows + customer + state in one query.
+    const { data, error } = await supabase
+      .from('conversations')
+      .select(`
+        id, status, last_message_at, created_at,
+        customer:customers(id, phone, name),
+        state:conversation_state(
+          current_intent, last_customer_msg, last_agent_msg, outcome
+        )
+      `)
+      .eq('business_id', businessId)
+      .in('id', resolvedConvIds)
+      .limit(limit);
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    // Step 3: decorate with resolved_at + escalation_id, sort by
+    // resolved_at desc, apply limit.
+    const decorated = (data || [])
+      .map((c) => ({
+        ...c,
+        resolved_at: resolvedAtByConv.get(c.id) ?? null,
+        // Carry the escalation id so the frontend can re-resolve if
+        // needed (it's already resolved, but defensive).
+        latest_escalation_id: escalationIdByConv.get(c.id) ?? null,
+        next_appointment: null as unknown, // skip the heavy join — history view doesn't need it
+      }))
+      .sort((a, b) => {
+        const at = a.resolved_at ? Date.parse(a.resolved_at) : 0;
+        const bt = b.resolved_at ? Date.parse(b.resolved_at) : 0;
+        return bt - at;
+      })
+      .slice(0, limit);
+
+    return res.json({ conversations: decorated });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// 7b. POST /api/escalations/:escalationId/resolve
+//
+// Owner clicks "Mark Resolved" on an escalation in the Escalations
+// tab. Flips escalation_events.resolved=true with resolved_at=now()
+// and resolved_by=auth.uid(). The row is left in place so the
+// "Resolved" sub-tab can still show it (history view) — the
+// /conversations list endpoint only returns rows where
+// resolved=false, so flipping this immediately drops the row from
+// the Active sub-tab.
+//
+// Idempotent: re-resolving an already-resolved row is a no-op
+// (returns 200 with the existing row). Returns 404 if the escalation
+// doesn't exist OR doesn't belong to this owner's business (we don't
+// distinguish — leaking "exists but not yours" would be an info
+// disclosure).
+//
+// Superadmin can resolve any escalation.
+// ---------------------------------------------------------------------------
+router.post(
+  '/escalations/:escalationId/resolve',
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const { escalationId } = req.params;
+    const user = req.user!;
+    const supabase = getSupabase();
+
+    // Load the escalation joined to its conversation so we can
+    // enforce business ownership in one round-trip. .maybeSingle()
+    // gives null for either "doesn't exist" or "exists but wrong
+    // business" — we collapse to a single 404 to avoid info
+    // disclosure.
+    const { data: esc, error: escErr } = await supabase
+      .from('escalation_events')
+      .select('id, resolved, conversation_id, conversations!inner(business_id)')
+      .eq('id', escalationId)
+      .maybeSingle();
+
+    if (escErr) {
+      return res.status(500).json({ error: escErr.message });
+    }
+    if (!esc) {
+      return res.status(404).json({ error: 'Escalation not found' });
+    }
+
+    const businessId = (esc as unknown as {
+      conversations: { business_id: string };
+    }).conversations.business_id;
+
+    if (!user.isSuperadmin && user.businessId !== businessId) {
+      // Don't leak that the row exists — same 404 as above.
+      return res.status(404).json({ error: 'Escalation not found' });
+    }
+
+    // Idempotent — if already resolved, just return the row.
+    if (esc.resolved) {
+      return res.json({
+        id: esc.id,
+        resolved: true,
+        alreadyResolved: true,
+      });
+    }
+
+    // resolved_by references profiles(id). The superadmin token
+    // synthesizes a fake id ('superadmin-secret') which is NOT a
+    // real profile row, so we leave resolved_by null for them rather
+    // than violate the FK.
+    const resolvedByPatch = user.isSuperadmin ? null : user.id;
+    const { data: updated, error: updErr } = await supabase
+      .from('escalation_events')
+      .update({
+        resolved: true,
+        resolved_at: new Date().toISOString(),
+        resolved_by: resolvedByPatch,
+      })
+      .eq('id', escalationId)
+      .select('id, resolved, resolved_at, resolved_by')
+      .maybeSingle();
+
+    if (updErr) {
+      return res.status(500).json({ error: updErr.message });
+    }
+    if (!updated) {
+      return res.status(500).json({ error: 'Resolve did not apply' });
+    }
+
+    return res.json({ ...updated, alreadyResolved: false });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// 7c. POST /api/conversations/:conversationId/owner-reply
+//
+// Owner hits Send in the Take Over Chat textarea. Persists the
+// owner turn to `messages` first (so the UI thread refreshes
+// immediately), then proxies the actual WhatsApp send to the bridge
+// service. The bridge is the only process that owns the live
+// WhatsAppWebClient instance — the backend is transport-agnostic.
+//
+// We always persist before send. If the bridge send fails, the
+// owner message row is still in `messages` (with the failed send
+// visible in bridge logs); the owner can re-send. We'd rather
+// double-log than drop a message the owner actually typed.
+//
+// Body: { text: string }
+// Returns:
+//   200 { ok: true, messageId, sentToBridge: boolean, error?: string }
+//   400 missing/empty text
+//   403 not your conversation
+//   404 conversation doesn't exist
+//   502 bridge is down
+//   500 unexpected error
+// ---------------------------------------------------------------------------
+router.post(
+  '/conversations/:conversationId/owner-reply',
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const { conversationId } = req.params;
+    const user = req.user!;
+    const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+
+    if (!text) {
+      return res.status(400).json({ error: 'text is required' });
+    }
+
+    const supabase = getSupabase();
+
+    // Load conversation + customer phone + businessId. .maybeSingle()
+    // so we can return a clean 404 for both "doesn't exist" and
+    // "exists but not yours".
+    const { data: conv, error: convErr } = await supabase
+      .from('conversations')
+      .select(
+        'id, business_id, customer_id, customers!inner(phone, wa_chat_id)'
+      )
+      .eq('id', conversationId)
+      .maybeSingle();
+
+    if (convErr) {
+      return res.status(500).json({ error: convErr.message });
+    }
+    if (!conv) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    const custRecord = Array.isArray(conv.customers)
+      ? conv.customers[0]
+      : conv.customers;
+    const customerPhone: string | null = custRecord?.phone ?? null;
+    const customerChatId: string | null = custRecord?.wa_chat_id ?? null;
+
+    if (!user.isSuperadmin && user.businessId !== conv.business_id) {
+      return res.status(403).json({ error: 'Not your conversation' });
+    }
+    if (!customerPhone && !customerChatId) {
+      return res.status(422).json({
+        error: 'Conversation has no resolvable customer identifier',
+      });
+    }
+
+    // Persist the owner message first. We use saveMessage which is
+    // best-effort; on failure we still attempt the bridge send so a
+    // DB hiccup doesn't silently lose the customer's received text.
+    let messageId: string | null = null;
+    try {
+      const { data: msgRow, error: msgErr } = await supabase
+        .from('messages')
+        .insert({
+          conversation_id: conversationId,
+          sender_type: 'owner',
+          content: text,
+        })
+        .select('id')
+        .maybeSingle();
+      if (msgErr) {
+        log.warn(
+          { conversationId, err: msgErr.message },
+          'owner-reply: messages insert failed (non-fatal — still attempting send)'
+        );
+      } else if (msgRow?.id) {
+        messageId = msgRow.id;
+      }
+    } catch (e) {
+      log.warn(
+        { conversationId, err: (e as Error).message },
+        'owner-reply: messages insert threw (non-fatal)'
+      );
+    }
+
+    // Best-effort: bump conversation_state + last_message_at so the
+    // row sorts correctly and the next LLM turn sees the owner reply
+    // in the context (if the customer replies next).
+    try {
+      await updateConversationState(conversationId, {
+        last_agent_msg: text,
+      });
+      await touchConversation(conversationId);
+    } catch (e) {
+      log.warn(
+        { conversationId, err: (e as Error).message },
+        'owner-reply: state/touch failed (non-fatal)'
+      );
+    }
+
+    // Resolve the chatId the bridge will hand to client.sendMessage.
+    //
+    // Priority order:
+    //   1. customers.wa_chat_id — the raw identifier whatsapp-web.js
+    //      handed us on the customer's last inbound message. This
+    //      is the ONLY way to handle LID-format customers
+    //      ("966541183544-1454589702") correctly; constructing
+    //      `${phone}@c.us` from the normalized digits would have
+    //      WhatsApp reject with "No LID for user".
+    //   2. customers.phone if it already contains '@' — some
+    //      legacy rows were stored with the full chat id rather
+    //      than normalized digits.
+    //   3. `${phone}@c.us` — fallback for customers whose
+    //      wa_chat_id is still NULL (i.e. they've never sent a
+    //      message since the wa_chat_id migration). They'll
+    //      backfill on their next inbound message.
+    //
+    // See upsertCustomerChatId() in db.ts and the migration at
+    // database/migrations/2026_08_07_add_customers_wa_chat_id.sql.
+    let chatId: string;
+    if (customerChatId && customerChatId.trim().length > 0) {
+      // Priority 1: explicit wa_chat_id from a recent inbound
+      // message. Captured by upsertCustomerChatId() in db.ts.
+      chatId = customerChatId.trim();
+    } else if (customerPhone && customerPhone.includes('@')) {
+      // Priority 2: phone already contains "@" — stored as a full
+      // chat id (e.g. "923001234567@c.us"). Some legacy rows.
+      chatId = customerPhone;
+    } else if (customerPhone && customerPhone.includes('-')) {
+      // Priority 3: phone contains a dash — it's already in
+      // whatsapp-web.js LID format ("966541183544-1454780892").
+      // Use as-is, do NOT append @c.us. Appending @c.us produces a
+      // malformed id that WhatsApp rejects with "No LID for user".
+      //
+      // This case fires for customers whose original inbound
+      // identifier was LID-format AND who haven't sent a new
+      // message since the wa_chat_id migration ran (so wa_chat_id
+      // is still NULL but phone was originally stored verbatim).
+      chatId = customerPhone;
+    } else if (customerPhone) {
+      // Priority 4: normalized digits — construct the standard
+      // <digits>@c.us chat id.
+      chatId = `${customerPhone}@c.us`;
+    } else {
+      // Shouldn't reach here — the 422 guard above catches
+      // !customerPhone && !customerChatId. Defensive fallback.
+      chatId = '';
+    }
+
+    // Proxy the actual send to the bridge. Wave 7 (Phase 4): extracted
+    // to lib/bridge-send.ts so the trial-notify helper can reuse it.
+    const bridgeResult = await bridgeSend(conv.business_id, chatId, text);
+
+    if (bridgeResult.ok) {
+      log.info(
+        { conversationId, businessId: conv.business_id, to: chatId, textLength: text.length },
+        'owner-reply delivered via bridge',
+      );
+      return res.json({ ok: true, sentToBridge: true, messageId });
+    }
+
+    // Map the bridgeResult to a meaningful HTTP status for the frontend.
+    // 'not configured' is a 503 (deployment gap, owner can't fix). Other
+    // failures are 502 (upstream unreachable / returned non-2xx).
+    const isNotConfigured = bridgeResult.error === 'bridge service not configured';
+    log.error(
+      { conversationId, err: bridgeResult.error, bridgeStatus: bridgeResult.bridgeStatus },
+      'owner-reply: bridge send failed',
+    );
+    return res.status(isNotConfigured ? 503 : 502).json({
+      error: bridgeResult.error,
+      bridgeStatus: bridgeResult.bridgeStatus,
+      bridgeBody: bridgeResult.bridgeBody,
+      sentToBridge: false,
+      messageId,
+    });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// 4b. GET /api/conversations/:conversationId/messages
+//
+// Story 18 — owner-facing inbox conversation thread. Returns every
+// customer/agent turn in chronological order. Requires:
+//   - requireAuth (Bearer JWT or superadmin token)
+//   - conversationId exists
+//   - caller's businessId owns that conversation
+//   - superadmin can read any conversation
+//
+// RLS on messages is the second line of defense, but we resolve and
+// gate explicitly here so a bad token gets 401/403 (not the generic
+// 403/empty rows RLS would return).
+// ---------------------------------------------------------------------------
+router.get(
+  '/conversations/:conversationId/messages',
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const { conversationId } = req.params;
+    if (!conversationId) {
+      return res.status(400).json({ error: 'Missing conversationId' });
+    }
+    const limit = Math.min(parseInt((req.query.limit as string) || '500', 10), 1000);
+
+    const supabase = getSupabase();
+    const { data: conv, error: convErr } = await supabase
+      .from('conversations')
+      .select('id, business_id')
+      .eq('id', conversationId)
+      .maybeSingle();
+
+    if (convErr) {
+      return res.status(500).json({ error: convErr.message });
+    }
+    if (!conv) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    // Ownership gate. Superadmin bypasses the business check.
+    if (!req.user!.isSuperadmin && req.user!.businessId !== conv.business_id) {
+      return res.status(403).json({ error: 'You do not own this conversation' });
+    }
+
+    const messages = await getMessageThread(conversationId, limit);
+    return res.json({
+      conversationId,
+      messages: messages.map((m) => ({
+        id: m.id,
+        sender_type: m.sender_type,
+        content: m.content,
+        created_at: m.created_at,
+      })),
+    });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// 4c. PATCH /api/business/:businessId/agent-active  (Story 13)
+//
+// Owner-side kill switch. Flips businesses.agent_active. When false,
+// handleIncomingMessage() short-circuits BEFORE calling the LLM —
+// customer messages are still persisted to `messages` so the owner
+// can read them in the inbox, but the bot never replies.
+//
+// Suspended billing_state is a hard guard: a paused-for-non-payment
+// tenant cannot self-pause-then-resume to dodge suspension. The
+// superadmin can still flip them back on after payment clears.
+//
+// Owner-only — distinct from the superadmin endpoint at
+// /api/superadmin/salons/:id/agent-active so the audit trail is
+// clear about who flipped the switch.
+// ---------------------------------------------------------------------------
+router.patch(
+  '/business/:businessId/agent-active',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const { agent_active } = (req.body || {}) as { agent_active?: boolean };
+    if (typeof agent_active !== 'boolean') {
+      return res.status(400).json({ error: 'agent_active must be a boolean' });
+    }
+
+    const supabase = getSupabase();
+
+    // Guard: suspended tenants cannot flip agent_active back on.
+    // Read billing_state + current agent_active in one query.
+    const { data: biz, error: bizErr } = await supabase
+      .from('businesses')
+      .select('agent_active, billing_state')
+      .eq('id', businessId)
+      .maybeSingle();
+
+    if (bizErr) {
+      return res.status(500).json({ error: bizErr.message });
+    }
+    if (!biz) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+
+    if (agent_active === true && biz.billing_state === 'suspended') {
+      return res.status(403).json({
+        error: 'Cannot reactivate AI while billing is suspended — clear payment first.',
+      });
+    }
+
+    const { data: updated, error: updErr } = await supabase
+      .from('businesses')
+      .update({ agent_active })
+      .eq('id', businessId)
+      .select('id, agent_active')
+      .maybeSingle();
+
+    if (updErr) {
+      return res.status(500).json({ error: updErr.message });
+    }
+    if (!updated) {
+      return res.status(404).json({ error: 'Business not found after update' });
+    }
+
+    console.log(
+      `[dashboard.ts] Story 13 — business ${businessId} agent_active: ${biz.agent_active} → ${agent_active} (flipped by owner)`,
+    );
+    return res.json({ id: updated.id, agent_active: updated.agent_active });
+  }
+);
+
+// GET /api/business/:businessId/agent-active — Story 13 companion read.
+// Used by the salon-portal toggle to render its initial state. Cheap
+// single-row SELECT; RLS-gated.
+router.get(
+  '/business/:businessId/agent-active',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const { data, error } = await getSupabase()
+      .from('businesses')
+      .select('id, agent_active')
+      .eq('id', businessId)
+      .maybeSingle();
+    if (error) return res.status(500).json({ error: error.message });
+    if (!data) return res.status(404).json({ error: 'Business not found' });
+    return res.json({ id: data.id, agent_active: data.agent_active !== false });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Wave 7 (Phase 3) — trial status for the dashboard banner + agent-action
+// gates. Returns the full TrialInfo so the frontend can render "X days
+// remaining" / "Expired" / "Paid" / etc. from a single fetch.
+//
+// All computation (days_remaining, isExpired) is done server-side in
+// lib/trial.ts so the frontend never has to duplicate the timezone math.
+// Reuses the same trial info helper the message-handler uses for the bot
+// short-circuit — single source of truth.
+// ---------------------------------------------------------------------------
+router.get(
+  '/business/:businessId/trial',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const info = await getTrialInfo(businessId);
+    return res.json({
+      businessId,
+      trial_status: info.status,
+      trial_started_at: info.startedAt,
+      trial_ends_at: info.endsAt,
+      days_remaining: info.daysRemaining,
+      is_expired: info.isExpired,
+    });
   }
 );
 
@@ -989,6 +1682,229 @@ router.put(
       .single();
     if (error) return res.status(500).json({ error: error.message });
     return res.json(data?.ai_rules || payload);
+  }
+);
+
+// ---------------------------------------------------------------------------
+// 15. GET /api/business/:businessId/hours
+// 16. PUT /api/business/:businessId/hours
+//
+// Owner-editable weekly schedule. The 7 rows live in business_hours with
+// a UNIQUE(business_id, day_of_week) constraint, so PUT uses an
+// UPSERT-per-row to handle "owner changed Monday but kept Tuesday" — no
+// DELETE-then-INSERT, no race window where the table is empty.
+//
+// Day codes match the existing seed convention:
+//   'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun'
+// (Short codes — see 08_fabs_salon_seed.sql and db.ts:842.)
+//
+// Buffer between appointments is currently UI-only (no DB column).
+// If we ever persist it, add a buffer_minutes integer to businesses.
+// ---------------------------------------------------------------------------
+
+const VALID_DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const;
+
+router.get(
+  '/business/:businessId/hours',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase
+      .from('business_hours')
+      .select('day_of_week, is_open, open_time, close_time')
+      .eq('business_id', businessId)
+      .order('day_of_week');
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ hours: data || [] });
+  }
+);
+
+router.put(
+  '/business/:businessId/hours',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const { hours } = (req.body || {}) as {
+      hours?: Array<{
+        day_of_week: string;
+        is_open: boolean;
+        open_time: string | null;
+        close_time: string | null;
+      }>;
+    };
+
+    if (!Array.isArray(hours) || hours.length !== 7) {
+      return res.status(400).json({
+        error: 'hours must be an array of exactly 7 rows (one per day_of_week)',
+      });
+    }
+
+    for (const h of hours) {
+      if (!VALID_DAYS.includes(h.day_of_week as typeof VALID_DAYS[number])) {
+        return res.status(400).json({
+          error: `Invalid day_of_week: ${h.day_of_week}. Must be one of: ${VALID_DAYS.join(', ')}`,
+        });
+      }
+      if (h.is_open) {
+        if (!h.open_time || !h.close_time) {
+          return res.status(400).json({
+            error: `When is_open=true, open_time and close_time are required (day: ${h.day_of_week})`,
+          });
+        }
+        if (
+          !/^\d{2}:\d{2}(:\d{2})?$/.test(h.open_time) ||
+          !/^\d{2}:\d{2}(:\d{2})?$/.test(h.close_time)
+        ) {
+          return res.status(400).json({
+            error: `Times must be HH:MM or HH:MM:SS (day: ${h.day_of_week})`,
+          });
+        }
+      }
+    }
+
+    const supabase = getSupabase();
+    const rows = hours.map((h) => ({
+      business_id: businessId,
+      day_of_week: h.day_of_week,
+      is_open: h.is_open,
+      open_time: h.is_open ? h.open_time : null,
+      close_time: h.is_open ? h.close_time : null,
+    }));
+
+    const { data, error } = await supabase
+      .from('business_hours')
+      .upsert(rows, { onConflict: 'business_id,day_of_week' })
+      .select('day_of_week, is_open, open_time, close_time');
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ hours: data || [] });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// 17. GET    /api/business/:businessId/holidays
+// 18. POST   /api/business/:businessId/holidays
+// 19. DELETE /api/business/:businessId/holidays/:holidayId
+//
+// Owner-editable closures / blackout dates. The `holidays` table has a
+// `reason` enum (public_holiday / event / maintenance / emergency /
+// other) AND a free-text `note`. The UI captures only the note
+// ("Independence Day", "Eid holiday", etc.), so we always write
+// reason='other' and stash the note in `note`. If the UI later wants
+// to pick a category, just expose it as a dropdown and switch this
+// helper to read both fields.
+//
+// The booking layer (db.ts:isWithinBusinessHours) checks this table
+// and rejects any attempt to book a slot on a holiday date.
+// ---------------------------------------------------------------------------
+
+router.get(
+  '/business/:businessId/holidays',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase
+      .from('holidays')
+      .select('id, date, reason, note, created_at')
+      .eq('business_id', businessId)
+      .order('date', { ascending: true });
+
+    if (error) return res.status(500).json({ error: error.message });
+    // Surface the free-text reason as a top-level `reason` field for
+    // the UI. The DB enum stays 'other' for now (see POST).
+    const holidays = (data || []).map((h) => ({
+      id: h.id,
+      date: h.date,
+      reason: h.note || '',
+      reason_kind: h.reason,
+    }));
+    return res.json({ holidays });
+  }
+);
+
+router.post(
+  '/business/:businessId/holidays',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const { date, reason } = (req.body || {}) as {
+      date?: string;
+      reason?: string;
+    };
+
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'date is required (YYYY-MM-DD)' });
+    }
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({ error: 'reason is required' });
+    }
+
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+      .from('holidays')
+      .insert({
+        business_id: businessId,
+        date,
+        reason: 'other',
+        note: reason.trim(),
+      })
+      .select('id, date, reason, note')
+      .single();
+
+    if (error) {
+      // 23505 = unique_violation on (business_id, date) — owner is
+      // re-adding a closure for the same date.
+      if (error.code === '23505') {
+        return res.status(409).json({
+          error: `A closure already exists for ${date}`,
+        });
+      }
+      return res.status(500).json({ error: error.message });
+    }
+    return res.status(201).json({
+      holiday: {
+        id: data.id,
+        date: data.date,
+        reason: data.note || '',
+        reason_kind: data.reason,
+      },
+    });
+  }
+);
+
+router.delete(
+  '/business/:businessId/holidays/:holidayId',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId, holidayId } = req.params;
+    const supabase = getSupabase();
+
+    // Confirm ownership before delete (don't leak existence).
+    const { data: existing } = await supabase
+      .from('holidays')
+      .select('business_id')
+      .eq('id', holidayId)
+      .maybeSingle();
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Holiday not found' });
+    }
+    if (existing.business_id !== businessId) {
+      return res.status(404).json({ error: 'Holiday not found' });
+    }
+
+    const { error } = await supabase
+      .from('holidays')
+      .delete()
+      .eq('id', holidayId);
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ id: holidayId });
   }
 );
 

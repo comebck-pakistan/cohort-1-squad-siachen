@@ -4,11 +4,44 @@ import type { SalonContext } from './db';
 // Env var is still named ANTHROPIC_API_KEY in .env (don't change the .env name
 // — just the value semantically holds a MiniMax key now). Functional rename
 // can come later.
+
+
+// ===== Local Ollama backup (commented out — MiniMax is active) =====
+// const API_KEY = "ollama";
+// const MODEL = 'qwen3.5:4b'; // 3b model, 1.9 GB, fast enough for WhatsApp-scale latency
+
+// // MiniMax-compatible local endpoint
+// const API_URL = 'http://192.168.1.32:11434/v1/chat/completions';
+
+
 const API_KEY = process.env.ANTHROPIC_API_KEY || '';
 const MODEL = 'MiniMax-M2.7-highspeed';
 
 // MiniMax API — OpenAI-compatible endpoint
 const API_URL = 'https://api.minimax.io/v1/chat/completions';
+
+
+//Local LLM
+
+
+// Model name to use in API,Size
+// qwen3.5:4b,3.4 GB
+// qwen2.5:3b,1.9 GB
+// phi4-mini:3.8b,2.5 GB
+// qwen3:4b,2.5 GB
+// llama3.2:3b,2.0 GB
+// qwen2.5:7b,4.7 GB
+/// v1/chat/completions
+//client = OpenAI(
+//     base_url="http://192.168.1.32:11434/v1",
+//     api_key="ollama"          # required by the library but ignored by Ollama
+// )
+
+
+
+
+
+
 
 // ---------------------------------------------------------------------------
 // Bot intent classification. The LLM is asked to return one of these strings
@@ -87,6 +120,8 @@ const BASE_PROMPT = `You are the WhatsApp receptionist for {{SALON_NAME}}, a rea
 You have access to (per-turn, fresh from the database — never guess):
 - {{SERVICES_LIST}} — service names, prices (PKR), durations
 - {{SALON_HOURS}} — opening hours per day-of-week
+- {{SALON_CLOSURES}} — owner-set one-off blackout dates (one per line: YYYY-MM-DD — reason). The salon is CLOSED on these dates regardless of weekly hours. ALWAYS cross-check a requested date against this list before agreeing to a booking.
+- {{EDGE_CASE_RULES}} — active salon/platform guardrails (medical, refund, comparison, etc.). Some are HARD rules (must refuse / escalate), some are SOFT guidance (prefer to escalate). When you see a HARD rule that matches what the customer is asking, set intent="complaint" and reply that the team will follow up — do NOT answer the question yourself.
 - {{CURRENT_DATETIME_PKT}} — actual current date+time in Pakistan Standard Time (Asia/Karachi, UTC+5). NEVER assume, guess, or calculate this yourself. Always read it from this turn's context.
 - {{UPCOMING_APPOINTMENT}} — the customer's next non-cancelled appointment at this salon, if any (service, date, time in PKT, stylist). May say "(none — customer has no upcoming bookings)" or "(unavailable — DB lookup failed)". Use this to disambiguate reschedule/cancel/clarification against ground truth — never guess when this is available.
 - {{CONVERSATION_STATE}} — locked-in slots from earlier in this conversation (selected_service, requested_date, requested_time, customer_name, customer_phone)
@@ -139,6 +174,7 @@ Bugs like telling a customer a future time "has already passed" are unacceptable
    - Any time on a FUTURE date (tomorrow, next week, etc.) is NEVER in the past. If preferred_date ≠ today's date, the "already passed" check does not apply.
 3. If asked what the current time/date is, state the current datetime plainly. Never invent a different time.
 4. Check the requested time against the salon's hours for that specific day-of-week before confirming — reject only if it's outside operating hours OR the slot is already booked, and say which.
+5. BEFORE confirming that a date is open, cross-check the requested date against {{SALON_CLOSURES}}. If the date is in that list, the salon is closed that day regardless of weekly hours — say so plainly ("14 August ko salon band hai — Azaadi day ki wajah se") and offer the next available date. Do NOT answer "open 2 PM to 9 PM" for a date that is in the closures list.
 5. If a time genuinely has passed (same day, earlier than now), say so ONCE, and immediately offer the next available slot — don't repeat the same rejection verbatim.
 
 ## 4. Booking flow
@@ -175,6 +211,10 @@ Answer directly from the services list and hours — prices, durations, service 
 ## 6. Escalation
 
 If the customer is upset, asks for a refund, complains about staff, or asks something outside booking/FAQ scope, set intent="complaint" and tell them a team member will follow up shortly. Do NOT try to resolve it yourself.
+
+## 6b. Health-adjacent questions (medical, skin, allergy, pregnancy)
+
+If the customer describes a symptom (rash, infection, swelling, hives, pain, burning, bleeding, allergic reaction), asks "is this safe for [pregnant/kids/sensitive skin]", or mentions pregnancy/nursing in the context of a service — DO NOT diagnose, DO NOT recommend a cream or medication, DO NOT confirm a booking. Reply briefly acknowledging the concern ("Yeh toh serious hai — main aapko team se connect karti/karta hoon, woh aapke specific case ke baare mein guide karenge") and set intent="complaint". The system records a medical_concern escalation independently of your reply — but the reply text also matters because the customer is reading it.
 
 ## 7. Owner overrides
 
@@ -274,6 +314,18 @@ function buildSystemPrompt(
         .join('\n')
     : '(no hours configured)';
 
+  const closuresBlock = ctx.holidays.length > 0
+    ? ctx.holidays
+        .map((h) => `- ${h.date} — ${h.reason}`)
+        .join('\n')
+    : '(no upcoming closures scheduled)';
+
+  const edgeRulesBlock = ctx.edge_case_rules.length > 0
+    ? ctx.edge_case_rules
+        .map((r) => `- [${r.rule_type.toUpperCase()}] ${r.rule_text}`)
+        .join('\n')
+    : '(no edge-case rules configured)';
+
   const stateBlock = (conversationStatePrompt && conversationStatePrompt.trim())
     ? conversationStatePrompt
     : '## Conversation state\n(no state yet — first message in this conversation)';
@@ -307,6 +359,8 @@ function buildSystemPrompt(
     // prompt is ~3K chars and the locked time slot is preserved.
     .replace('{{SERVICES_LIST}}', servicesBlock)
     .replace('{{SALON_HOURS}}', hoursBlock)
+    .replace('{{SALON_CLOSURES}}', closuresBlock)
+    .replace('{{EDGE_CASE_RULES}}', edgeRulesBlock)
     .replace('{{CURRENT_DATETIME_PKT}}', `${ctx.current_datetime_pkt} (today is ${ctx.today_pkt})`)
     .replace('{{CONVERSATION_STATE}}', stateBlock)
     .replace('{{AI_RULES}}', rulesBlock)

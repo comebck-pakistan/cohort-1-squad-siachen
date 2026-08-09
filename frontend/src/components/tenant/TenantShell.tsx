@@ -1,7 +1,10 @@
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useTenantBusinessId } from "@/lib/useTenantBusinessId";
+import { api, qk } from "@/lib/api";
+import { SubscriptionPanel } from "./SubscriptionPanel";
 import {
   LayoutDashboard,
   MessagesSquare,
@@ -43,7 +46,7 @@ type NavItem = {
 const nav: NavItem[] = [
   { to: "/salon-portal", label: "Overview", icon: LayoutDashboard, exact: true },
   { to: "/salon-portal/bookings", label: "Bookings", icon: CalendarDays },
-  { to: "/salon-portal/inbox", label: "Conversations", icon: MessagesSquare },
+  { to: "/salon-portal/inbox", label: "Escalations", icon: MessagesSquare },
   { to: "/salon-portal/escalations", label: "Edge Cases", icon: AlertTriangle, badge: 3 },
   { to: "/salon-portal/business", label: "Services & Staff", icon: Scissors },
   { to: "/salon-portal/ai-rules", label: "Agent Rules", icon: Bot },
@@ -119,6 +122,22 @@ export function TenantShell() {
     setMobileOpen(false);
   }, [pathname]);
 
+  // Wave 7 — fetch trial status. MUST be called before any early returns
+  // below to satisfy the Rules of Hooks (React Query's useBaseQuery chains
+  // useContext + useEffect under the hood, so the hook count must stay
+  // stable across renders). Used by the SubscriptionPanel in the sidebar
+  // and by the agent-action gates in TenantBusiness + TenantInbox. React
+  // Query dedups by key, so the loading-shell branches below still see
+  // the same query instance.
+  const businessId = identity?.businessId;
+  const trialQ = useQuery({
+    queryKey: businessId ? qk.myTrialStatus(businessId) : ["trial-status", "none"],
+    queryFn: () => api.myTrialStatus(businessId!),
+    enabled: !!businessId,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+  });
+
   // Brief loading shell while /api/auth/me resolves. Without this the user
   // sees a "Your salon" placeholder flash before the real identity lands.
   if (tenant.isLoading && !identity) {
@@ -159,6 +178,8 @@ export function TenantShell() {
     toast.success("Signed out");
     navigate({ to: "/login" });
   }
+
+  const trialExpired = trialQ.data?.is_expired === true;
 
   return (
     <div className="flex min-h-screen w-full bg-[oklch(0.985_0.005_180)] text-foreground">
@@ -273,6 +294,10 @@ export function TenantShell() {
             <div className="flex items-center gap-2 opacity-80"><Megaphone className="size-3.5" /> Promotions · coming soon</div>
           </div>
         </div>
+
+        {/* Wave 7 — subscription state panel. Shows paid / trial-active /
+            expiring-soon / expired. Replaces the old full-width UpgradeBanner. */}
+        <SubscriptionPanel data={trialQ.data} isLoading={trialQ.isLoading} />
 
         {/* Owner card */}
         <div className="border-t p-3">

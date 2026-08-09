@@ -33,13 +33,36 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Plus, Trash2, CalendarX, Pencil, Loader2 } from "lucide-react";
+import { Plus, Trash2, CalendarX, Pencil, Loader2, Bot, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import { api, qk } from "@/lib/api";
 import { useTenantBusinessId } from "@/lib/useTenantBusinessId";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const HOURS = Array.from({ length: 24 }, (_, h) => `${String(h).padStart(2, "0")}:00`);
+
+// Map display name ↔ DB day code. business_hours.day_of_week uses the
+// short codes that match the existing seed (08_fabs_salon_seed.sql) and
+// the booking-layer check in db.ts:isWithinBusinessHours. The UI shows
+// full names for readability; we translate at the boundary.
+const DAY_CODE_BY_NAME: Record<string, string> = {
+  Monday: "mon",
+  Tuesday: "tue",
+  Wednesday: "wed",
+  Thursday: "thu",
+  Friday: "fri",
+  Saturday: "sat",
+  Sunday: "sun",
+};
+const DAY_NAME_BY_CODE: Record<string, string> = {
+  mon: "Monday",
+  tue: "Tuesday",
+  wed: "Wednesday",
+  thu: "Thursday",
+  fri: "Friday",
+  sat: "Saturday",
+  sun: "Sunday",
+};
 
 type ServiceRow = {
   id: string;
@@ -62,6 +85,9 @@ const seedStaff: Array<{
 }> = [];
 
 export function TenantBusiness() {
+  const tenant = useTenantBusinessId();
+  const businessId = tenant.data?.businessId ?? "";
+
   return (
     <div className="p-6 space-y-6">
       <div>
@@ -70,6 +96,11 @@ export function TenantBusiness() {
           Configure hours, services, and staff — the AI uses these to book appointments.
         </p>
       </div>
+      {/* Story 13 — owner-side AI pause. Renders a card with a Switch + a
+          warning banner when paused. Wired to PATCH /api/business/:id/agent-active
+          via api.setMyAgentActive(). The backend short-circuit in
+          handleIncomingMessage() is the actual pause; this is just the knob. */}
+      {businessId && <AgentToggle businessId={businessId} />}
       <Tabs defaultValue="hours">
         <TabsList>
           <TabsTrigger value="hours">Operating Hours</TabsTrigger>
@@ -91,6 +122,22 @@ export function TenantBusiness() {
 }
 
 function HoursTab() {
+  const tenant = useTenantBusinessId();
+  const businessId = tenant.data?.businessId ?? "";
+  const qc = useQueryClient();
+
+  // ---- Weekly schedule (business_hours) ---------------------------------
+  const hoursQ = useQuery({
+    queryKey: businessId ? qk.businessHours(businessId) : ["business-hours", "none"],
+    queryFn: () => api.businessHours(businessId),
+    enabled: !!businessId,
+    staleTime: 60_000,
+  });
+
+  // Local state — kept so Switch flips + TimeSelect changes feel instant
+  // without round-tripping. We sync from the API on first load only
+  // (length-gated useEffect below), so we don't fight the user while
+  // they're editing.
   const [days, setDays] = useState(
     DAYS.map((d) => ({
       day: d,
@@ -99,12 +146,111 @@ function HoursTab() {
       to: "20:00",
     })),
   );
+  // Buffer is UI-only — there's no DB column. If we ever persist it,
+  // add buffer_minutes integer to businesses and surface it through
+  // api.businessHours() / saveBusinessHours().
   const [buffer, setBuffer] = useState("15");
-  const [closures, setClosures] = useState<{ date: string; reason: string }[]>([
-    { date: "2026-08-14", reason: "Independence Day" },
-  ]);
+
+  // Sync API → local state on first load. Trigger only on length change
+  // so subsequent re-fetches (post-save invalidation) don't clobber
+  // the owner's unsaved edits.
+  useEffect(() => {
+    const list = hoursQ.data?.hours;
+    if (!list || list.length === 0) return;
+    const byCode = new Map(list.map((h) => [h.day_of_week, h]));
+    setDays(
+      DAYS.map((name) => {
+        const code = DAY_CODE_BY_NAME[name];
+        const db = byCode.get(code);
+        return {
+          day: name,
+          open: db?.is_open ?? name !== "Sunday",
+          // Postgres `time` returns 'HH:MM:SS'; trim to 'HH:MM' for the
+          // Select which only has hour granularity.
+          from: db?.open_time ? db.open_time.slice(0, 5) : "10:00",
+          to: db?.close_time ? db.close_time.slice(0, 5) : "20:00",
+        };
+      }),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hoursQ.data?.hours?.length]);
+
+  const saveHoursMut = useMutation({
+    mutationFn: (payload: { hours: typeof days }) =>
+      api.saveBusinessHours(
+        businessId,
+        payload.hours.map((d) => ({
+          day_of_week: DAY_CODE_BY_NAME[d.day],
+          is_open: d.open,
+          open_time: d.open ? `${d.from}:00` : null,
+          close_time: d.open ? `${d.to}:00` : null,
+        })),
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.businessHours(businessId) });
+      toast.success("Hours saved");
+    },
+    onError: (e: Error) => toast.error(`Could not save hours: ${e.message}`),
+  });
+
+  function saveHours() {
+    if (saveHoursMut.isPending) return;
+    saveHoursMut.mutate({ hours: days });
+  }
+
+  // ---- Holidays & Closures (holidays table) -----------------------------
+  const holidaysQ = useQuery({
+    queryKey: businessId ? qk.holidays(businessId) : ["holidays", "none"],
+    queryFn: () => api.holidays(businessId),
+    enabled: !!businessId,
+    staleTime: 60_000,
+  });
+
+  const [closures, setClosures] = useState<
+    { id: string; date: string; reason: string }[]
+  >([]);
   const [newDate, setNewDate] = useState("");
   const [newReason, setNewReason] = useState("");
+
+  // Sync API → local state on first load (length-gated, same pattern
+  // as Weekly Schedule above).
+  useEffect(() => {
+    const list = holidaysQ.data?.holidays;
+    if (!list) return;
+    setClosures(
+      list.map((h) => ({ id: h.id, date: h.date, reason: h.reason })),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [holidaysQ.data?.holidays?.length]);
+
+  const addHolidayMut = useMutation({
+    mutationFn: (payload: { date: string; reason: string }) =>
+      api.addHoliday(businessId, payload),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.holidays(businessId) });
+      toast.success("Holiday added");
+      setNewDate("");
+      setNewReason("");
+    },
+    onError: (e: Error) =>
+      toast.error(`Could not add holiday: ${e.message}`),
+  });
+
+  const deleteHolidayMut = useMutation({
+    mutationFn: (holidayId: string) =>
+      api.deleteHoliday(businessId, holidayId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.holidays(businessId) });
+      toast.success("Holiday removed");
+    },
+    onError: (e: Error) =>
+      toast.error(`Could not remove holiday: ${e.message}`),
+  });
+
+  function addClosure() {
+    if (!newDate || !newReason) return;
+    addHolidayMut.mutate({ date: newDate, reason: newReason });
+  }
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -154,6 +300,18 @@ function HoursTab() {
               </SelectContent>
             </Select>
           </div>
+          <div className="pt-4 border-t flex justify-end">
+            <Button
+              onClick={saveHours}
+              disabled={saveHoursMut.isPending || !businessId}
+              className="bg-primary hover:bg-primary/90"
+            >
+              {saveHoursMut.isPending && (
+                <Loader2 className="size-4 animate-spin" />
+              )}
+              Save Changes
+            </Button>
+          </div>
         </CardContent>
       </Card>
 
@@ -165,24 +323,32 @@ function HoursTab() {
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="space-y-2">
-            {closures.map((c, i) => (
-              <div
-                key={i}
-                className="flex items-center justify-between gap-2 rounded-md border px-3 py-2 bg-background"
-              >
-                <div>
-                  <div className="text-sm font-medium">{c.date}</div>
-                  <div className="text-xs text-muted-foreground">{c.reason}</div>
-                </div>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  onClick={() => setClosures((s) => s.filter((_, j) => j !== i))}
-                >
-                  <Trash2 className="size-4" />
-                </Button>
+            {closures.length === 0 ? (
+              <div className="text-xs text-muted-foreground rounded-md border border-dashed px-3 py-4 text-center">
+                No closures added yet.
               </div>
-            ))}
+            ) : (
+              closures.map((c) => (
+                <div
+                  key={c.id}
+                  className="flex items-center justify-between gap-2 rounded-md border px-3 py-2 bg-background"
+                >
+                  <div>
+                    <div className="text-sm font-medium">{c.date}</div>
+                    <div className="text-xs text-muted-foreground">{c.reason}</div>
+                  </div>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    disabled={deleteHolidayMut.isPending}
+                    onClick={() => deleteHolidayMut.mutate(c.id)}
+                    aria-label={`Remove ${c.date}`}
+                  >
+                    <Trash2 className="size-4" />
+                  </Button>
+                </div>
+              ))
+            )}
           </div>
           <div className="space-y-2 pt-3 border-t">
             <Input
@@ -200,14 +366,15 @@ function HoursTab() {
             <Button
               size="sm"
               className="w-full"
-              disabled={!newDate || !newReason}
-              onClick={() => {
-                setClosures((s) => [...s, { date: newDate, reason: newReason }]);
-                setNewDate("");
-                setNewReason("");
-              }}
+              disabled={!newDate || !newReason || addHolidayMut.isPending}
+              onClick={addClosure}
             >
-              <Plus className="size-4" /> Add closure
+              {addHolidayMut.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Plus className="size-4" />
+              )}{" "}
+              Add closure
             </Button>
           </div>
         </CardContent>
@@ -984,6 +1151,148 @@ function StaffTab() {
             )}
           </TableBody>
         </Table>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AgentToggle — Story 13 owner-side kill switch
+//
+// Three states render here:
+//   - loading  → small skeleton
+//   - active   → green check icon + "Bot is responding" subtext
+//   - paused   → warning banner + "Resume bot" CTA
+//
+// All flips go through api.setMyAgentActive() which PATCHes
+// /api/business/:id/agent-active. The backend's handleIncomingMessage()
+// reads agent_active at the top of every turn and short-circuits
+// without calling the LLM when paused — so this toggle is the only
+// UI-level piece; the real "pause" is in lib/message-handler.ts.
+//
+// Critically: even while paused, customer messages are still written
+// to the messages table so the owner can read them in the inbox
+// before flipping the switch back on.
+// ---------------------------------------------------------------------------
+function AgentToggle({ businessId }: { businessId: string }) {
+  const qc = useQueryClient();
+  const state = useQuery({
+    queryKey: qk.myAgentActive(businessId),
+    queryFn: () => api.getMyAgentActive(businessId),
+    enabled: !!businessId,
+    staleTime: 30_000,
+  });
+
+  // Wave 7 — when trial_status='expired', the bot can't actually reply
+  // with intelligent messages (message-handler sends a fixed fallback).
+  // Disable the pause toggle so the owner doesn't waste a click; the
+  // banner above the shell already explains why. PATCH is also rejected
+  // client-side — the flip mutation is gated on `!trialExpired` below.
+  const trialQ = useQuery({
+    queryKey: qk.myTrialStatus(businessId),
+    queryFn: () => api.myTrialStatus(businessId),
+    enabled: !!businessId,
+    staleTime: 60_000,
+  });
+  const trialExpired = trialQ.data?.is_expired === true;
+
+  const flip = useMutation({
+    mutationFn: (active: boolean) => api.setMyAgentActive(businessId, active),
+    onMutate: async (active) => {
+      // Block the flip entirely when trial is expired — the bot is already
+      // in fixed-fallback mode regardless of agent_active, so toggling
+      // would mislead the owner about whether replies are happening.
+      if (trialExpired) {
+        toast.error("Trial ended — upgrade to resume the AI receptionist.");
+        // Throw a non-network error so the mutation fails cleanly without
+        // firing the API. onError catches it and toasts.
+        throw new Error("trial_expired");
+      }
+      // Optimistic update — the toggle feels instant.
+      await qc.cancelQueries({ queryKey: qk.myAgentActive(businessId) });
+      const prev = qc.getQueryData<{ id: string; agent_active: boolean }>(
+        qk.myAgentActive(businessId),
+      );
+      qc.setQueryData(qk.myAgentActive(businessId), {
+        id: businessId,
+        agent_active: active,
+      });
+      return { prev };
+    },
+    onError: (e: Error, _active, ctx) => {
+      if (ctx?.prev) {
+        qc.setQueryData(qk.myAgentActive(businessId), ctx.prev);
+      }
+      // Suppress the noisy network-error toast for the synthetic
+      // trial-expired throw above.
+      if (e.message === "trial_expired") return;
+      toast.error(`Could not flip AI status: ${e.message}`);
+    },
+    onSuccess: (_data, active) => {
+      toast.success(active ? "AI resumed — bot will reply" : "AI paused — bot will not reply");
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: qk.myAgentActive(businessId) });
+    },
+  });
+
+  const active = state.data?.agent_active ?? true;
+
+  return (
+    <Card className={`border shadow-none bg-white ${trialExpired ? "opacity-70" : ""}`}>
+      <CardContent className="p-4">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div
+              className={`size-9 rounded-md grid place-items-center ${
+                trialExpired
+                  ? "bg-warning-soft text-[oklch(0.45_0.14_70)]"
+                  : active
+                    ? "bg-success-soft text-[oklch(0.35_0.12_145)]"
+                    : "bg-warning-soft text-[oklch(0.35_0.1_70)]"
+              }`}
+            >
+              <Bot className="size-5" />
+            </div>
+            <div>
+              <div className="font-medium">AI Receptionist</div>
+              <div className="text-xs text-muted-foreground">
+                {trialExpired
+                  ? "Trial ended — bot is sending a fixed reply. Upgrade to resume."
+                  : state.isLoading
+                    ? "Checking status…"
+                    : active
+                      ? "Bot is responding to new WhatsApp messages"
+                      : "Paused — bot is not replying. Customer messages are still logged."}
+              </div>
+            </div>
+          </div>
+          <Switch
+            checked={active}
+            disabled={state.isLoading || flip.isPending || trialExpired}
+            onCheckedChange={(checked) => flip.mutate(checked)}
+            title={trialExpired ? "Trial ended — upgrade to continue" : undefined}
+          />
+        </div>
+        {trialExpired && (
+          <div className="mt-3 flex items-start gap-2 rounded-md border border-warning bg-warning-soft/60 p-3 text-sm">
+            <AlertTriangle className="size-4 text-[oklch(0.45_0.14_70)] mt-0.5 shrink-0" />
+            <div>
+              Your free trial has ended. The toggle is locked until you upgrade.
+              Customer messages are still saved — open the <strong>Inbox</strong> to read them.
+            </div>
+          </div>
+        )}
+        {!active && (
+          <div className="mt-3 flex items-start gap-2 rounded-md border border-warning bg-warning-soft/60 p-3 text-sm">
+            <AlertTriangle className="size-4 text-[oklch(0.45_0.14_70)] mt-0.5 shrink-0" />
+            <div>
+              The bot will not reply to incoming WhatsApp messages until you
+              turn this back on. Customer messages are still saved — open
+              the <strong>Inbox</strong> to read them.
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

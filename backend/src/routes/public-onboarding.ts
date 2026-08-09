@@ -1,3 +1,21 @@
+// ---------------------------------------------------------------------------
+// @deprecated — REPLACED by `routes/free-trial-signup.ts` in Wave 6 (Phase 1).
+//
+// Kept on disk for audit history. NOT MOUNTED in `backend/src/index.ts`.
+//
+// This router's only endpoint was:
+//   POST /api/onboarding/submit
+// It received the Step-5 payment screenshot + persona fields from the old
+// 3-step wizard and wrote everything to the `onboarding_submissions` and
+// `payments` tables. That data went into a void — nothing in the codebase
+// ever read `onboarding_submissions` or flipped `payments.status` out of
+// `pending`. The persona fields (agent_name/tone/languages) had no column
+// on `businesses` and no placeholder in the LLM prompt.
+//
+// The new wizard has no payment step, no persona picker, and no screenshot
+// upload. All signup state goes through `free-trial-signup.ts` instead.
+// ---------------------------------------------------------------------------
+
 import { Router, Request, Response } from 'express';
 import { getSupabase } from '../lib/supabase';
 
