@@ -57,6 +57,32 @@ const BRIDGE_TOKEN = process.env.BRIDGE_INTERNAL_TOKEN || '';
 const log = childLogger('route.dashboard');
 
 // ---------------------------------------------------------------------------
+// Supabase joined-select helper.
+//
+// Supabase's untyped `from().select()` doesn't infer the shape of joined
+// columns (e.g. `customer:customers(...)`, `service:services(name)`,
+// `staff:staff(name)`). At runtime the value comes back as either a
+// single object, a one-element array, or null — depending on whether
+// the relation is to-one or to-many. TypeScript types all three
+// shapes as `never`, so any `.id` / `.name` access errors.
+//
+// `pickJoin` accepts the runtime-typed value (cast to `unknown` so it
+// accepts whatever the joined column resolves to) and returns the
+// first element (or undefined). Call sites cast the joined column to
+// the shape they expect — keeps the helper generic across `customers`
+// / `services` / `staff` / `business` joins.
+//
+// We deliberately don't regenerate Supabase types via the CLI here —
+// that's a bigger refactor and these errors block the Render build
+// (which runs `tsc` in production mode). This is the minimal fix.
+// ---------------------------------------------------------------------------
+function pickJoin<T>(v: unknown): T | undefined {
+  if (Array.isArray(v)) return v[0] as T | undefined;
+  if (v === null || v === undefined) return undefined;
+  return v as T;
+}
+
+// ---------------------------------------------------------------------------
 // 1. GET /api/business/:businessId/today
 // ---------------------------------------------------------------------------
 router.get(
@@ -592,7 +618,7 @@ router.get(
     // we don't N+1 the conversations list. Only future, non-cancelled
     // appointments count.
     const customerIds = (data || [])
-      .map((c) => (Array.isArray(c.customer) ? c.customer[0]?.id : c.customer?.id))
+      .map((c) => pickJoin<{ id?: string }>(c.customer)?.id)
       .filter((x): x is string => Boolean(x));
     let nextByCustomer = new Map<
       string,
@@ -618,8 +644,8 @@ router.get(
           start_time: a.start_time,
           end_time: a.end_time,
           status: a.status,
-          service_name: (Array.isArray(a.service) ? a.service[0]?.name : a.service?.name) ?? null,
-          staff_name: (Array.isArray(a.staff) ? a.staff[0]?.name : a.staff?.name) ?? null,
+          service_name: pickJoin<{ name?: string }>(a.service)?.name ?? null,
+          staff_name: pickJoin<{ name?: string }>(a.staff)?.name ?? null,
         });
       }
     }
