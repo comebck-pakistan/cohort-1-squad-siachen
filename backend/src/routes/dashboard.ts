@@ -42,6 +42,7 @@ import {
 import { childLogger } from '../lib/logger';
 import { getTrialInfo } from '../lib/trial';
 import { bridgeSend } from '../lib/bridge-send';
+import { isValidRuleKey, isValidTriggerKey } from '../lib/predefined-rules';
 
 const router = Router();
 const auth = [requireAuth] as const;
@@ -1592,19 +1593,18 @@ router.get(
 // 13. GET /api/business/:businessId/ai-rules
 // 14. PUT /api/business/:businessId/ai-rules
 //
-// Owner-customized AI agent rules (TenantAIRules.tsx). Stored as JSONB
-// on the businesses row (see database/schema/14_business_ai_rules.sql).
-// Returns sensible defaults when the column is NULL so the UI never
-// sits empty for a fresh signup.
+// Wave 9 — owner-customized AI agent rules. Stored as typed rows in
+// `business_rule` and `business_escalation_trigger` (see
+// database/schema/19_predefined_rules.sql). The old ai_rules JSONB blob
+// was dropped in that migration — the previous freeform Custom Salon
+// Rules only worked by accident (the prompt read the JSON as a string
+// and the model sometimes parsed prose-shaped entries).
+//
+// New shape: { enabledRules: string[], enabledTriggers: string[] }
+// The vocabulary for both arrays is platform-defined in
+// backend/src/lib/predefined-rules.ts. Owners can toggle which rules
+// are enabled but cannot edit the rule text.
 // ---------------------------------------------------------------------------
-const DEFAULT_AI_RULES = {
-  rules: [] as string[],
-  triggers: { discounts: true, late: true, custom: true },
-  discountMode: 'promo' as 'decline' | 'promo',
-  latePolicy:
-    'If a customer is more than 15 minutes late, offer to reschedule or hold the slot for 5 more minutes.',
-};
-
 router.get(
   '/business/:businessId/ai-rules',
   ...owned('businessId'),
@@ -1612,40 +1612,26 @@ router.get(
     const { businessId } = req.params;
     const supabase = getSupabase();
 
-    const { data, error } = await supabase
-      .from('businesses')
-      .select('ai_rules')
-      .eq('id', businessId)
-      .maybeSingle();
-    if (error) return res.status(500).json({ error: error.message });
+    const [{ data: ruleRows, error: ruleErr }, { data: triggerRows, error: triggerErr }] =
+      await Promise.all([
+        supabase
+          .from('business_rule')
+          .select('rule_key')
+          .eq('business_id', businessId)
+          .eq('enabled', true),
+        supabase
+          .from('business_escalation_trigger')
+          .select('trigger_key')
+          .eq('business_id', businessId)
+          .eq('enabled', true),
+      ]);
+    if (ruleErr) return res.status(500).json({ error: ruleErr.message });
+    if (triggerErr) return res.status(500).json({ error: triggerErr.message });
 
-    const stored = (data?.ai_rules as Partial<typeof DEFAULT_AI_RULES>) || {};
-    const merged = {
-      rules: Array.isArray(stored.rules) ? stored.rules : DEFAULT_AI_RULES.rules,
-      triggers: {
-        discounts:
-          typeof stored.triggers?.discounts === 'boolean'
-            ? stored.triggers.discounts
-            : DEFAULT_AI_RULES.triggers.discounts,
-        late:
-          typeof stored.triggers?.late === 'boolean'
-            ? stored.triggers.late
-            : DEFAULT_AI_RULES.triggers.late,
-        custom:
-          typeof stored.triggers?.custom === 'boolean'
-            ? stored.triggers.custom
-            : DEFAULT_AI_RULES.triggers.custom,
-      },
-      discountMode:
-        stored.discountMode === 'decline' || stored.discountMode === 'promo'
-          ? stored.discountMode
-          : DEFAULT_AI_RULES.discountMode,
-      latePolicy:
-        typeof stored.latePolicy === 'string' && stored.latePolicy.length > 0
-          ? stored.latePolicy
-          : DEFAULT_AI_RULES.latePolicy,
-    };
-    return res.json(merged);
+    return res.json({
+      enabledRules: (ruleRows ?? []).map((r) => r.rule_key as string),
+      enabledTriggers: (triggerRows ?? []).map((t) => t.trigger_key as string),
+    });
   }
 );
 
@@ -1654,34 +1640,77 @@ router.put(
   ...owned('businessId'),
   async (req: Request, res: Response) => {
     const { businessId } = req.params;
-    const body = (req.body || {}) as Partial<typeof DEFAULT_AI_RULES>;
-
-    const payload = {
-      rules: Array.isArray(body.rules) ? body.rules.slice(0, 50) : [],
-      triggers: {
-        discounts: !!body.triggers?.discounts,
-        late: !!body.triggers?.late,
-        custom: !!body.triggers?.custom,
-      },
-      discountMode:
-        body.discountMode === 'decline' || body.discountMode === 'promo'
-          ? body.discountMode
-          : 'promo',
-      latePolicy:
-        typeof body.latePolicy === 'string'
-          ? body.latePolicy.slice(0, 1000)
-          : DEFAULT_AI_RULES.latePolicy,
+    const body = (req.body || {}) as {
+      enabledRules?: unknown;
+      enabledTriggers?: unknown;
     };
 
+    // Validate and normalize the incoming arrays. Reject unknown keys
+    // outright — the vocabulary is owned by the platform, not the owner.
+    const incomingRules = Array.isArray(body.enabledRules)
+      ? (body.enabledRules as unknown[]).filter(
+          (k): k is string => typeof k === 'string' && isValidRuleKey(k),
+        )
+      : [];
+    const incomingTriggers = Array.isArray(body.enabledTriggers)
+      ? (body.enabledTriggers as unknown[]).filter(
+          (k): k is string => typeof k === 'string' && isValidTriggerKey(k),
+        )
+      : [];
+
     const supabase = getSupabase();
-    const { data, error } = await supabase
-      .from('businesses')
-      .update({ ai_rules: payload })
-      .eq('id', businessId)
-      .select('ai_rules')
-      .single();
-    if (error) return res.status(500).json({ error: error.message });
-    return res.json(data?.ai_rules || payload);
+
+    // Rules: replace the enabled set wholesale. Strategy is
+    //   1. disable every existing rule for this business
+    //   2. upsert the incoming set as enabled
+    // Two-step because the table has no single "set enabled set" op.
+    // Both steps touch only this business's rows so concurrent writes
+    // by other owners are unaffected.
+    const { error: ruleDisableErr } = await supabase
+      .from('business_rule')
+      .update({ enabled: false })
+      .eq('business_id', businessId);
+    if (ruleDisableErr) return res.status(500).json({ error: ruleDisableErr.message });
+
+    if (incomingRules.length > 0) {
+      const { error: ruleUpsertErr } = await supabase
+        .from('business_rule')
+        .upsert(
+          incomingRules.map((rule_key) => ({
+            business_id: businessId,
+            rule_key,
+            enabled: true,
+          })),
+          { onConflict: 'business_id,rule_key' },
+        );
+      if (ruleUpsertErr) return res.status(500).json({ error: ruleUpsertErr.message });
+    }
+
+    // Triggers: same pattern.
+    const { error: triggerDisableErr } = await supabase
+      .from('business_escalation_trigger')
+      .update({ enabled: false })
+      .eq('business_id', businessId);
+    if (triggerDisableErr) return res.status(500).json({ error: triggerDisableErr.message });
+
+    if (incomingTriggers.length > 0) {
+      const { error: triggerUpsertErr } = await supabase
+        .from('business_escalation_trigger')
+        .upsert(
+          incomingTriggers.map((trigger_key) => ({
+            business_id: businessId,
+            trigger_key,
+            enabled: true,
+          })),
+          { onConflict: 'business_id,trigger_key' },
+        );
+      if (triggerUpsertErr) return res.status(500).json({ error: triggerUpsertErr.message });
+    }
+
+    return res.json({
+      enabledRules: incomingRules,
+      enabledTriggers: incomingTriggers,
+    });
   }
 );
 

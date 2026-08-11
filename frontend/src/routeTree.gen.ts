@@ -21,7 +21,6 @@ import { Route as SalonPortalIndexRouteImport } from './routes/salon-portal.inde
 import { Route as SalonPortalAiRulesRouteImport } from './routes/salon-portal.ai-rules'
 import { Route as SalonPortalBookingsRouteImport } from './routes/salon-portal.bookings'
 import { Route as SalonPortalBusinessRouteImport } from './routes/salon-portal.business'
-import { Route as SalonPortalEscalationsRouteImport } from './routes/salon-portal.escalations'
 import { Route as SalonPortalInboxRouteImport } from './routes/salon-portal.inbox'
 import { Route as SalonPortalOnboardingRouteImport } from './routes/salon-portal.onboarding'
 import { Route as SuperadminIndexRouteImport } from './routes/superadmin.index'
@@ -90,11 +89,6 @@ const SalonPortalBusinessRoute = SalonPortalBusinessRouteImport.update({
   path: '/business',
   getParentRoute: () => SalonPortalRoute,
 } as any)
-const SalonPortalEscalationsRoute = SalonPortalEscalationsRouteImport.update({
-  id: '/escalations',
-  path: '/escalations',
-  getParentRoute: () => SalonPortalRoute,
-} as any)
 const SalonPortalInboxRoute = SalonPortalInboxRouteImport.update({
   id: '/inbox',
   path: '/inbox',
@@ -143,7 +137,6 @@ export interface FileRoutesByFullPath {
   '/salon-portal/ai-rules': typeof SalonPortalAiRulesRoute
   '/salon-portal/bookings': typeof SalonPortalBookingsRoute
   '/salon-portal/business': typeof SalonPortalBusinessRoute
-  '/salon-portal/escalations': typeof SalonPortalEscalationsRoute
   '/salon-portal/inbox': typeof SalonPortalInboxRoute
   '/salon-portal/onboarding': typeof SalonPortalOnboardingRoute
   '/superadmin/login': typeof SuperadminLoginRoute
@@ -163,7 +156,6 @@ export interface FileRoutesByTo {
   '/salon-portal/ai-rules': typeof SalonPortalAiRulesRoute
   '/salon-portal/bookings': typeof SalonPortalBookingsRoute
   '/salon-portal/business': typeof SalonPortalBusinessRoute
-  '/salon-portal/escalations': typeof SalonPortalEscalationsRoute
   '/salon-portal/inbox': typeof SalonPortalInboxRoute
   '/salon-portal/onboarding': typeof SalonPortalOnboardingRoute
   '/superadmin/login': typeof SuperadminLoginRoute
@@ -186,7 +178,6 @@ export interface FileRoutesById {
   '/salon-portal/ai-rules': typeof SalonPortalAiRulesRoute
   '/salon-portal/bookings': typeof SalonPortalBookingsRoute
   '/salon-portal/business': typeof SalonPortalBusinessRoute
-  '/salon-portal/escalations': typeof SalonPortalEscalationsRoute
   '/salon-portal/inbox': typeof SalonPortalInboxRoute
   '/salon-portal/onboarding': typeof SalonPortalOnboardingRoute
   '/superadmin/login': typeof SuperadminLoginRoute
@@ -210,7 +201,6 @@ export interface FileRouteTypes {
     | '/salon-portal/ai-rules'
     | '/salon-portal/bookings'
     | '/salon-portal/business'
-    | '/salon-portal/escalations'
     | '/salon-portal/inbox'
     | '/salon-portal/onboarding'
     | '/superadmin/login'
@@ -230,7 +220,6 @@ export interface FileRouteTypes {
     | '/salon-portal/ai-rules'
     | '/salon-portal/bookings'
     | '/salon-portal/business'
-    | '/salon-portal/escalations'
     | '/salon-portal/inbox'
     | '/salon-portal/onboarding'
     | '/superadmin/login'
@@ -252,7 +241,6 @@ export interface FileRouteTypes {
     | '/salon-portal/ai-rules'
     | '/salon-portal/bookings'
     | '/salon-portal/business'
-    | '/salon-portal/escalations'
     | '/salon-portal/inbox'
     | '/salon-portal/onboarding'
     | '/superadmin/login'
@@ -360,13 +348,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SalonPortalBusinessRouteImport
       parentRoute: typeof SalonPortalRoute
     }
-    '/salon-portal/escalations': {
-      id: '/salon-portal/escalations'
-      path: '/escalations'
-      fullPath: '/salon-portal/escalations'
-      preLoaderRoute: typeof SalonPortalEscalationsRouteImport
-      parentRoute: typeof SalonPortalRoute
-    }
     '/salon-portal/inbox': {
       id: '/salon-portal/inbox'
       path: '/inbox'
@@ -423,7 +404,6 @@ interface SalonPortalRouteChildren {
   SalonPortalAiRulesRoute: typeof SalonPortalAiRulesRoute
   SalonPortalBookingsRoute: typeof SalonPortalBookingsRoute
   SalonPortalBusinessRoute: typeof SalonPortalBusinessRoute
-  SalonPortalEscalationsRoute: typeof SalonPortalEscalationsRoute
   SalonPortalInboxRoute: typeof SalonPortalInboxRoute
   SalonPortalOnboardingRoute: typeof SalonPortalOnboardingRoute
   SalonPortalIndexRoute: typeof SalonPortalIndexRoute
@@ -433,7 +413,6 @@ const SalonPortalRouteChildren: SalonPortalRouteChildren = {
   SalonPortalAiRulesRoute: SalonPortalAiRulesRoute,
   SalonPortalBookingsRoute: SalonPortalBookingsRoute,
   SalonPortalBusinessRoute: SalonPortalBusinessRoute,
-  SalonPortalEscalationsRoute: SalonPortalEscalationsRoute,
   SalonPortalInboxRoute: SalonPortalInboxRoute,
   SalonPortalOnboardingRoute: SalonPortalOnboardingRoute,
   SalonPortalIndexRoute: SalonPortalIndexRoute,

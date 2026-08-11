@@ -922,24 +922,19 @@ export const api = {
     })),
 
   aiRules: (businessId: string) =>
-    withMock(`/api/business/${businessId}/ai-rules`, () => ({
-      rules: [] as string[],
-      triggers: { discounts: true, late: true, custom: true },
-      discountMode: "promo" as "decline" | "promo",
-      latePolicy:
-        "If a customer is more than 15 minutes late, offer to reschedule or hold the slot for 5 more minutes.",
+    withMock<{
+      enabledRules: string[];
+      enabledTriggers: string[];
+    }>(`/api/business/${businessId}/ai-rules`, () => ({
+      enabledRules: [],
+      enabledTriggers: [],
     })),
 
   updateAiRules: (
     businessId: string,
-    body: {
-      rules: string[];
-      triggers: { discounts: boolean; late: boolean; custom: boolean };
-      discountMode: "decline" | "promo";
-      latePolicy: string;
-    },
+    body: { enabledRules: string[]; enabledTriggers: string[] },
   ) =>
-    withMock(
+    withMock<{ enabledRules: string[]; enabledTriggers: string[] }>(
       `/api/business/${businessId}/ai-rules`,
       () => body,
       { method: "PUT", body: JSON.stringify(body) },

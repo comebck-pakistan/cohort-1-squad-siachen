@@ -36,3 +36,6 @@ sessions/
 
 # Puppeteer browser cache (Chromium download)
 .local-chromium/
+
+# Personal wave acceptance tests (Wave 9 hardening — not committed)
+test/wave-*-acceptance.ts

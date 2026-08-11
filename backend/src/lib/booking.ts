@@ -9,6 +9,72 @@ import {
 import type { GenerateReplyResult } from './llm';
 
 // ---------------------------------------------------------------------------
+// Confirmation-prompt guard (Wave 9 Stage 15).
+//
+// The TOP-LEVEL BINDING CONSTRAINT in llm.ts says "ALWAYS RECONFIRM before
+// destructive actions". But the prompt rule alone isn't reliable — the LLM
+// sometimes returns intent=reschedule with all slots filled AND a reply
+// that's a confirmation prompt like "Confirming: Nail Art Full Set on
+// Thu 13 Aug 4 PM with Sana Malik. Shall I proceed?". Without this guard,
+// handleReschedule / handleBook / handleCancel would immediately execute
+// the destructive action and overwrite the LLM's confirmation prompt
+// with "✅ Rescheduled!" — defeating the whole point of asking first.
+//
+// Heuristic: if the LLM's reply contains confirmation-seeking language
+// ("shall I proceed", "confirming:", "sahi?", "theek?", "haan kar dun?", etc.),
+// skip the destructive action and return the LLM's reply verbatim. The
+// customer reads the prompt, replies "haan kar do", and the NEXT turn the
+// LLM returns intent=reschedule with the same slots but WITHOUT the
+// confirmation phrasing — at which point the destructive handler runs.
+//
+// This is a heuristic — a future improvement would be to add an explicit
+// `awaiting_confirmation: boolean` field to GenerateReplyResult and have
+// the prompt instruct the LLM to set it. For now the patterns below catch
+// every phrasing we've seen the LLM produce.
+// ---------------------------------------------------------------------------
+
+const CONFIRMATION_PROMPT_PATTERNS: RegExp[] = [
+  // English phrasing
+  /\bshall\s+i\s+(proceed|go ahead|book|submit|request|reschedule|cancel|do this|confirm)\b/i,
+  /\bconfirming\s*[:\-]/i,
+  /\bconfirming\s+(your|that|this|the)\b/i,
+  /\bis\s+(this|that|it)\s+(correct|right|okay|ok)\s*\??/i,
+  /\bjust\s+to\s+confirm\b/i,
+  /\bcan\s+i\s+confirm\b/i,
+  /\bplease\s+confirm\b/i,
+  /\breply\s+(with\s+)?(yes|haan|kar\s+do|confirm)\b/i,
+  /\bshall\s+i\s+go\s+ahead\b/i,
+
+  // Roman Urdu phrasing
+  /\bsahi?\s+(hai|he|hain)\s*\??/i,
+  /\bsahi\s*\??/i,             // bare "Sahi?" at end of sentence
+  /\btheek?\s+(hai|he|hain)\s*\??/i,
+  /\btheek\s*\??/i,            // bare "Theek?"
+  /\bconfirm\s+kar(\s+dun|\s+do|\s+den)?\??/i,
+  /\bkar\s+(dun|do|den)\s*\??/i,
+  /\bsubmit\s+kar(\s+dun|\s+do|\s+den)?\??/i,
+  /\bhaan?\s+(kar\s+do|kar\s+dun|sahi\s+hai)\s*\??/i,
+  /\bsahi?\s+lag\s+(raha|rha)\s+(hai|he)?\s*\??/i,
+];
+
+/**
+ * Returns true if the LLM's reply text looks like a confirmation-seeking
+ * prompt rather than a confirmation / success. Heuristic-based — see the
+ * CONFIRMATION_PROMPT_PATTERNS comment above for context.
+ *
+ * IMPORTANT: this must NOT trigger on success messages ("Booked!",
+ * "Rescheduled!") or on simple clarifying questions that aren't asking
+ * for destructive-action confirmation ("which service did you mean?").
+ * The patterns above are scoped to confirmation-of-action phrasing only.
+ */
+export function isConfirmationPrompt(reply: string): boolean {
+  if (!reply) return false;
+  // Strip any think blocks that survived parsing.
+  const cleaned = reply.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+  return CONFIRMATION_PROMPT_PATTERNS.some((p) => p.test(cleaned));
+}
+
+// ---------------------------------------------------------------------------
 // Booking decision layer.
 //
 // Takes the structured output from the LLM (intent + slots + reply text)
@@ -275,6 +341,16 @@ export async function processBookingDecision(
       (e as Error).message);
   }
 
+  // Step 3.9: Stage 16 — confirmation gate. If the LLM is asking the
+  // customer to confirm ("shall I proceed", "Confirming: ...", "sahi?"),
+  // skip the destructive action and send the prompt. The customer
+  // replies "haan kar do"; the LLM then returns intent=book with the
+  // same slots but without confirmation phrasing; we book here.
+  if (isConfirmationPrompt(llmResult.reply)) {
+    console.log('[booking-decision] book AWAITING CONFIRMATION — skipping destructive action');
+    return { finalReply: llmResult.reply, appointment: null };
+  }
+
   // Step 4: attempt the booking
   let outcome: AppointmentOutcome;
   try {
@@ -340,6 +416,17 @@ async function handleReschedule(
   // let the LLM's reply (asking for the missing piece) go through.
   if (!llmResult.preferred_date || !llmResult.preferred_time) {
     console.log('[booking-decision] reschedule SKIPPED — missing date/time');
+    return { finalReply: llmResult.reply, appointment: null };
+  }
+
+  // Stage 16 — confirmation gate. If the LLM's reply is asking for
+  // reconfirmation ("shall I proceed", "Confirming: ... Sahi?", etc.),
+  // skip the destructive action and send the prompt to the customer.
+  // The customer replies "haan kar do" on the next turn; the LLM then
+  // returns intent=reschedule with the same slots but WITHOUT the
+  // confirmation phrasing, and we execute here.
+  if (isConfirmationPrompt(llmResult.reply)) {
+    console.log('[booking-decision] reschedule AWAITING CONFIRMATION — skipping destructive action');
     return { finalReply: llmResult.reply, appointment: null };
   }
 
@@ -432,6 +519,13 @@ async function handleCancel(
     });
   } catch (e) {
     console.warn('[booking-decision] cancel persist failed:', (e as Error).message);
+  }
+
+  // Stage 16 — confirmation gate. Same as reschedule/book: if the LLM
+  // is asking for reconfirmation, skip the destructive action.
+  if (isConfirmationPrompt(llmResult.reply)) {
+    console.log('[booking-decision] cancel AWAITING CONFIRMATION — skipping destructive action');
+    return { finalReply: llmResult.reply, appointment: null };
   }
 
   try {
