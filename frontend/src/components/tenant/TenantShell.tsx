@@ -13,7 +13,6 @@ import {
   Users,
   Megaphone,
   Bot,
-  AlertTriangle,
   Building2,
   ChevronDown,
   CircleDot,
@@ -47,7 +46,6 @@ const nav: NavItem[] = [
   { to: "/salon-portal", label: "Overview", icon: LayoutDashboard, exact: true },
   { to: "/salon-portal/bookings", label: "Bookings", icon: CalendarDays },
   { to: "/salon-portal/inbox", label: "Escalations", icon: MessagesSquare },
-  { to: "/salon-portal/escalations", label: "Edge Cases", icon: AlertTriangle, badge: 3 },
   { to: "/salon-portal/business", label: "Services & Staff", icon: Scissors },
   { to: "/salon-portal/ai-rules", label: "Agent Rules", icon: Bot },
   { to: "/salon-portal/onboarding", label: "Connect WhatsApp", icon: Smartphone },
@@ -142,7 +140,7 @@ export function TenantShell() {
   // sees a "Your salon" placeholder flash before the real identity lands.
   if (tenant.isLoading && !identity) {
     return (
-      <div className="flex min-h-screen w-full items-center justify-center bg-[oklch(0.985_0.005_180)]">
+      <div className="flex min-h-screen w-full items-center justify-center bg-background">
         <div className="flex items-center gap-3 text-sm text-muted-foreground">
           <Skeleton className="size-4 rounded-full" />
           Loading your salon…
@@ -153,7 +151,7 @@ export function TenantShell() {
 
   if (tenant.isError && !identity) {
     return (
-      <div className="flex min-h-screen w-full items-center justify-center bg-[oklch(0.985_0.005_180)] p-6">
+      <div className="flex min-h-screen w-full items-center justify-center bg-background p-6">
         <div className="max-w-md text-center">
           <div className="text-base font-medium">Could not load your salon</div>
           <div className="mt-1 text-sm text-muted-foreground">
@@ -182,7 +180,7 @@ export function TenantShell() {
   const trialExpired = trialQ.data?.is_expired === true;
 
   return (
-    <div className="flex min-h-screen w-full bg-[oklch(0.985_0.005_180)] text-foreground">
+    <div className="flex min-h-screen w-full bg-background text-foreground">
       {/* Mobile overlay */}
       {mobileOpen && (
         <button

@@ -68,7 +68,7 @@ export function SubscriptionPanel({
   if (!trial_ends_at) {
     return (
       <div className="mx-3 mb-3 rounded-lg border border-success-soft/60 bg-success-soft/30 p-3 text-xs">
-        <div className="flex items-center gap-2 font-medium text-[oklch(0.35_0.12_145)]">
+        <div className="flex items-center gap-2 font-medium text-[oklch(0.42_0.10_195)]">
           <CheckCheck className="size-3.5" />
           Active subscription
         </div>
@@ -83,7 +83,7 @@ export function SubscriptionPanel({
   if (trial_status === "converted") {
     return (
       <div className="mx-3 mb-3 rounded-lg border border-success-soft/60 bg-success-soft/30 p-3 text-xs">
-        <div className="flex items-center gap-2 font-medium text-[oklch(0.35_0.12_145)]">
+        <div className="flex items-center gap-2 font-medium text-[oklch(0.42_0.10_195)]">
           <CheckCheck className="size-3.5" />
           Paid subscription
         </div>

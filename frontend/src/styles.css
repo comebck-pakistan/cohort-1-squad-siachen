@@ -5,8 +5,18 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * Recepta design system — luxurious warm neutrals, sleek dark contrast,
- * emerald + rose-gold accents. All colors use oklch.
+ * Recepta design system — warm ivory neutrals, sleek dark contrast,
+ * teal brand accents. All colors use oklch.
+ *
+ * Brand scale (light mode):
+ *   #A5E6E2  light teal / soft surfaces / icon containers
+ *   #77DAD7  light teal
+ *   #36B8B7  primary accent / success indicator
+ *   #0A858C  signature Recepta brand teal / primary CTA
+ *   #0B757B  deep teal / hover state
+ *
+ * The page should read ~75% warm neutral, ~25% teal influence.
+ * Teal is the accent, not the background.
  */
 
 @theme inline {
@@ -57,9 +67,7 @@
   --color-warning-foreground: var(--warning-foreground);
   --color-warning-soft: var(--warning-soft);
   --color-danger-soft: var(--danger-soft);
-  --color-rose-gold: var(--rose-gold);
-  --color-rose-gold-soft: var(--rose-gold-soft);
-  --color-emerald-glow: var(--emerald-glow);
+  --color-teal-glow: var(--teal-glow);
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-display: "Fraunces", "Playfair Display", ui-serif, Georgia, serif;
@@ -67,49 +75,53 @@
 
 :root {
   --radius: 0.75rem;
-  /* Recepta — warm ivory bg, emerald primary, rose-gold accent */
+  /* Recepta — warm ivory bg, teal primary (#0A858C), light-teal accents */
   --background: oklch(0.985 0.008 75);
   --foreground: oklch(0.22 0.02 40);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.22 0.02 40);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.22 0.02 40);
-  --primary: oklch(0.55 0.13 165);
+  /* Primary — signature Recepta brand teal (#0A858C) */
+  --primary: oklch(0.45 0.10 195);
   --primary-foreground: oklch(0.99 0.005 90);
   --secondary: oklch(0.96 0.01 70);
   --secondary-foreground: oklch(0.25 0.02 40);
   --muted: oklch(0.96 0.012 70);
   --muted-foreground: oklch(0.5 0.02 50);
-  --accent: oklch(0.92 0.06 35);
-  --accent-foreground: oklch(0.32 0.08 35);
+  /* Accent — light teal container for badges, icon backgrounds, soft surfaces (#A5E6E2) */
+  --accent: oklch(0.94 0.04 195);
+  --accent-foreground: oklch(0.42 0.10 195);
   --destructive: oklch(0.6 0.22 27);
   --destructive-foreground: oklch(0.99 0.005 90);
   --border: oklch(0.9 0.012 70);
   --input: oklch(0.92 0.012 70);
-  --ring: oklch(0.55 0.13 165);
-  --chart-1: oklch(0.55 0.13 165);
-  --chart-2: oklch(0.72 0.11 40);
-  --chart-3: oklch(0.65 0.14 30);
-  --chart-4: oklch(0.45 0.08 200);
-  --chart-5: oklch(0.78 0.1 85);
+  --ring: oklch(0.45 0.10 195);
+  /* Chart palette — five-step teal scale, signature brand to deep accent */
+  --chart-1: oklch(0.45 0.10 195); /* #0A858C — signature brand */
+  --chart-2: oklch(0.63 0.11 195); /* #36B8B7 — primary accent */
+  --chart-3: oklch(0.79 0.08 195); /* #77DAD7 — light teal */
+  --chart-4: oklch(0.90 0.05 195); /* #A5E6E2 — soft surface */
+  --chart-5: oklch(0.40 0.10 195); /* #0B757B — deep teal / hover */
   --sidebar: oklch(0.19 0.015 40);
   --sidebar-foreground: oklch(0.95 0.01 70);
-  --sidebar-primary: oklch(0.65 0.14 165);
+  --sidebar-primary: oklch(0.63 0.11 195); /* #36B8B7 — bright accent for sidebar */
   --sidebar-primary-foreground: oklch(0.15 0.02 40);
   --sidebar-accent: oklch(0.26 0.02 40);
   --sidebar-accent-foreground: oklch(0.98 0.005 70);
   --sidebar-border: oklch(0.3 0.02 40);
-  --sidebar-ring: oklch(0.65 0.14 165);
-  --success: oklch(0.6 0.16 155);
-  --success-foreground: oklch(0.99 0.005 145);
-  --success-soft: oklch(0.94 0.06 155);
+  --sidebar-ring: oklch(0.63 0.11 195);
+  /* Success — teal brand (success indicators use brand color, not red/green) */
+  --success: oklch(0.63 0.11 195);
+  --success-foreground: oklch(0.99 0.005 90);
+  --success-soft: oklch(0.94 0.04 195);
+  /* Warning + danger stay amber/red — semantically distinct from brand */
   --warning: oklch(0.72 0.15 70);
   --warning-foreground: oklch(0.25 0.05 70);
   --warning-soft: oklch(0.95 0.06 85);
   --danger-soft: oklch(0.94 0.05 27);
-  --rose-gold: oklch(0.72 0.09 40);
-  --rose-gold-soft: oklch(0.94 0.04 40);
-  --emerald-glow: oklch(0.68 0.16 165);
+  /* Teal glow — bright teal for hero gradients + product accents */
+  --teal-glow: oklch(0.68 0.13 195);
 }
 
 .dark {
@@ -119,37 +131,36 @@
   --card-foreground: oklch(0.96 0.01 70);
   --popover: oklch(0.21 0.02 40);
   --popover-foreground: oklch(0.96 0.01 70);
-  --primary: oklch(0.7 0.14 165);
+  /* Brighter teal primary for dark mode */
+  --primary: oklch(0.70 0.12 195);
   --primary-foreground: oklch(0.15 0.02 40);
   --secondary: oklch(0.26 0.02 40);
   --secondary-foreground: oklch(0.96 0.01 70);
   --muted: oklch(0.26 0.02 40);
   --muted-foreground: oklch(0.68 0.02 60);
-  --accent: oklch(0.3 0.05 40);
-  --accent-foreground: oklch(0.96 0.01 70);
+  --accent: oklch(0.30 0.06 195);
+  --accent-foreground: oklch(0.90 0.05 195);
   --destructive: oklch(0.68 0.19 22);
   --destructive-foreground: oklch(0.99 0.005 90);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 12%);
-  --ring: oklch(0.7 0.14 165);
+  --ring: oklch(0.70 0.12 195);
   --sidebar: oklch(0.13 0.015 40);
   --sidebar-foreground: oklch(0.95 0.01 70);
-  --sidebar-primary: oklch(0.7 0.14 165);
-  --sidebar-primary-foreground: oklch(0.13 0.015 40);
+  --sidebar-primary: oklch(0.70 0.12 195);
+  --sidebar-primary-foreground: oklch(0.13 0.02 40);
   --sidebar-accent: oklch(0.22 0.02 40);
   --sidebar-accent-foreground: oklch(0.96 0.01 70);
   --sidebar-border: oklch(1 0 0 / 8%);
-  --sidebar-ring: oklch(0.7 0.14 165);
-  --success: oklch(0.7 0.16 155);
-  --success-foreground: oklch(0.13 0.015 40);
-  --success-soft: oklch(0.28 0.06 155);
+  --sidebar-ring: oklch(0.70 0.12 195);
+  --success: oklch(0.70 0.12 195);
+  --success-foreground: oklch(0.13 0.02 40);
+  --success-soft: oklch(0.30 0.06 195);
   --warning: oklch(0.78 0.14 70);
-  --warning-foreground: oklch(0.15 0.02 40);
-  --warning-soft: oklch(0.3 0.06 70);
+  --warning-foreground: oklch(0.15 0.02 70);
+  --warning-soft: oklch(0.3 0.06 85);
   --danger-soft: oklch(0.3 0.08 27);
-  --rose-gold: oklch(0.78 0.1 40);
-  --rose-gold-soft: oklch(0.3 0.05 40);
-  --emerald-glow: oklch(0.75 0.16 165);
+  --teal-glow: oklch(0.75 0.13 195);
 }
 
 @layer base {
@@ -171,7 +182,8 @@
 }
 
 @utility bg-gradient-luxe {
-  background-image: linear-gradient(135deg, var(--color-emerald-glow), var(--color-rose-gold));
+  /* Bright teal glow → signature deep teal */
+  background-image: linear-gradient(135deg, var(--color-teal-glow), var(--color-primary));
 }
 
 @utility bg-gradient-warm {
@@ -179,7 +191,8 @@
 }
 
 @utility text-gradient-luxe {
-  background-image: linear-gradient(135deg, var(--color-primary), var(--color-rose-gold));
+  /* Signature teal → deeper teal text gradient */
+  background-image: linear-gradient(135deg, var(--color-primary), var(--color-accent-foreground));
   background-clip: text;
   -webkit-background-clip: text;
   color: transparent;
@@ -188,7 +201,7 @@
 @utility shadow-luxe {
   box-shadow:
     0 1px 2px oklch(0.2 0.02 40 / 0.06),
-    0 20px 40px -20px oklch(0.55 0.13 165 / 0.25);
+    0 20px 40px -20px oklch(0.45 0.10 195 / 0.25);
 }
 
 @utility pulse-dot {

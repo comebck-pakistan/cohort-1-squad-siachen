@@ -52,7 +52,7 @@ function AdminLogin() {
     <div className="grid min-h-screen place-items-center bg-sidebar p-6 text-sidebar-foreground">
       <div className="absolute inset-0 -z-10 opacity-60">
         <div className="absolute -top-24 left-1/3 size-[520px] rounded-full bg-primary/25 blur-3xl" />
-        <div className="absolute right-0 top-40 size-[420px] rounded-full bg-rose-gold/20 blur-3xl" />
+        <div className="absolute right-0 top-40 size-[420px] rounded-full bg-accent/40 blur-3xl" />
       </div>
       <div className="w-full max-w-md rounded-3xl border border-sidebar-border bg-card p-8 text-card-foreground shadow-luxe">
         <Link to="/" className="flex items-center gap-2">

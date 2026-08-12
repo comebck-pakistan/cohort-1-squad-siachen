@@ -55,7 +55,7 @@ const statusMeta: Record<
   },
   ready: {
     label: "Connected",
-    className: "bg-success-soft text-[oklch(0.35_0.12_145)]",
+    className: "bg-success-soft text-[oklch(0.42_0.10_195)]",
   },
   disconnected: {
     label: "Disconnected — will retry",

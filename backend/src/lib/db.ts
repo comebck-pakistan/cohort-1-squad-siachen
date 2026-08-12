@@ -214,6 +214,52 @@ const MEDICAL_PATTERNS: RegExp[] = [
   /\bhospital\b/i,             // hospital
   /\bmedical\b/i,              // generic safety net ("medical insurance",
                                // "medical condition", "medical expenses")
+
+  // === Roman Urdu / Hindi symptom vocabulary (Stage 15) ===
+  // The bulk of our customers text in Roman Urdu. The English-only patterns
+  // above missed "mere nail ke neeche kala sa ho gaya hai aur dard bhi hai"
+  // because "kala" (dark/black spot) and "dard" (pain) don't match any of
+  // them. Adding the common symptom words so the medical-concern escalation
+  // actually fires when the customer describes a symptom in Urdu.
+  //
+  // Each is a whole-word match (\b boundaries) to avoid false positives
+  // like "sujan" inside "sujana" or "daag" inside "daagna".
+  /\bdard\b/i,                  // pain
+  /\bkala\s+sa\b/i,             // dark spot ("kala sa ho gaya" = "became dark")
+  /\bkala\s+pad\s+gaya\b/i,     // "became dark"
+  /\bkalaa\b/i,                 // alt spelling
+  /\bdaag\b/i,                  // spot / stain
+  /\bsujan\b/i,                 // swelling
+  /\bsoojhan\b/i,               // alt spelling of swelling
+  /\bkhaarish\b/i,              // itching
+  /\bkharish\b/i,               // alt spelling
+  /\bjalaa\b/i,                 // burning
+  /\bjal\s+(?:gaya|gayi)\b/i,   // "got burned"
+  /\bkhoon\b/i,                 // blood
+  /\bkhoon\s+aa\s+(?:raha|gaya)\b/i, // "bleeding"
+  /\bganth\b/i,                 // lump
+  /\bganthr\b/i,                // alt spelling
+  /\bphoda\b/i,                 // blister / pimple
+  /\bpholay\b/i,                // alt spelling
+  /\bkharab\b/i,                // "spoiled" (often used for "ruined" nails/skin)
+  /\btoot\s+(?:raha|rahi|gaya|gayi)\b/i, // "breaking"
+  /\bpeela\b/i,                 // yellow (nail discoloration)
+  /\bsafed\b/i,                 // white (spots)
+  /\bnaak\s+se\s+khoon\b/i,     // nosebleed — borderline
+  /\bbukhar\b/i,                // fever
+  /\bbukhaar\b/i,               // alt spelling
+  /\bsardi\b/i,                  // cold
+  /\bkhaansi\b/i,               // cough
+  /\bkhaasi\b/i,                // alt spelling
+  /\bsaans\b/i,                  // breath (shortness of)
+  /\bfung(?:us|al|i)?\b/i,      // fungus / fungal — customer word, our keyword matcher was English-only
+
+  // === Specific phrasing patterns customers use in Roman Urdu ===
+  /\bis\s+(?:ka|ye|yeh)\s+(?:ka|se)\s+(?:kya|kaise)\b/i,    // "is ka kya treatment"
+  /\btreatment\s+(?:kya|hai|kya\s+hai)\b/i,                  // "treatment kya hai"
+  /\b(?:medicine|dawai|dawei)\s+(?:kya|deni|chahiye|lena)\b/i,
+  /\bdoctor\s+ko\s+(?:dikhana|dikhlau|dikhayein)\b/i,
+  /\bhospital\s+(?:jaana|jau|jana)\b/i,
 ];
 
 /**
@@ -1003,9 +1049,19 @@ export interface SalonContext {
   current_datetime_pkt: string;
   /** Today's date in PKT as YYYY-MM-DD (derived from current_datetime_pkt). */
   today_pkt: string;
-  /** Owner-edited free-form AI rules (JSONB on businesses table). Empty
-   *  string when none. Wired into the LLM system prompt. */
+  /** @deprecated Kept around so the LLM prompt builder (Stage 4) can be
+   *  swapped over without a breaking interface change. The wave-9 reads
+   *  pull from `business_rule` (typed toggles) instead — this field is
+   *  always empty and will be removed in Stage 4. */
   ai_rules: string;
+  /** Wave 9 — predefined rules the owner has enabled for this salon.
+   *  Keys map to PREDEFINED_RULES in backend/src/lib/predefined-rules.ts.
+   *  Empty array when no rules are enabled. Wired into the LLM prompt
+   *  by buildSystemPrompt() in Stage 4. */
+  enabledRules: string[];
+  /** Wave 9 — predefined escalation triggers the owner has enabled.
+   *  Keys map to PREDEFINED_TRIGGERS. Same wiring as enabledRules. */
+  enabledTriggers: string[];
 }
 
 /**
@@ -1054,23 +1110,44 @@ export async function getSalonContext(businessId: string): Promise<SalonContext>
     current_datetime_pkt: currentDatetimePkt,
     today_pkt: todayPkt,
     ai_rules: '',
+    enabledRules: [],
+    enabledTriggers: [],
   };
 
-  // Business basics + AI rules (single SELECT — they're on the same row)
+  // Business basics (no ai_rules read — the column was dropped in
+  // schema/19_predefined_rules.sql; the new typed toggles live in
+  // business_rule and business_escalation_trigger, fetched below).
   const { data: biz } = await getSupabase()
     .from('businesses')
-    .select('name, city, timezone, ai_rules')
+    .select('name, city, timezone')
     .eq('id', businessId)
     .maybeSingle();
   if (biz) {
     ctx.name = biz.name;
     ctx.city = biz.city;
     ctx.timezone = biz.timezone || 'Asia/Karachi';
-    // ai_rules is JSONB — accept either string or array shape, normalize
-    const r = biz.ai_rules as unknown;
-    if (typeof r === 'string') ctx.ai_rules = r;
-    else if (Array.isArray(r)) ctx.ai_rules = r.map(String).join('\n');
-    else if (r && typeof r === 'object') ctx.ai_rules = JSON.stringify(r, null, 2);
+  }
+
+  // Wave 9 — predefined rules enabled for this salon. Partial index
+  // idx_business_rule_enabled (WHERE enabled = TRUE) keeps this cheap
+  // even with hundreds of rules per owner.
+  const { data: ruleRows } = await getSupabase()
+    .from('business_rule')
+    .select('rule_key')
+    .eq('business_id', businessId)
+    .eq('enabled', true);
+  if (ruleRows) {
+    ctx.enabledRules = ruleRows.map((r) => r.rule_key as string);
+  }
+
+  // Wave 9 — predefined escalation triggers enabled for this salon.
+  const { data: triggerRows } = await getSupabase()
+    .from('business_escalation_trigger')
+    .select('trigger_key')
+    .eq('business_id', businessId)
+    .eq('enabled', true);
+  if (triggerRows) {
+    ctx.enabledTriggers = triggerRows.map((t) => t.trigger_key as string);
   }
 
   // Active services

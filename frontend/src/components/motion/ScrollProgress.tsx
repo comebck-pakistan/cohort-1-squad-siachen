@@ -31,7 +31,7 @@ export function ScrollProgress() {
         height: 2,
         transformOrigin: "0% 50%",
         background:
-          "linear-gradient(90deg, oklch(0.85 0.08 70), oklch(0.55 0.13 165))",
+          "linear-gradient(90deg, oklch(0.85 0.08 70), oklch(0.63 0.11 195))",
         zIndex: 40,
         pointerEvents: "none",
       }}

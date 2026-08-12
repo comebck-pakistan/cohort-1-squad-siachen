@@ -93,7 +93,7 @@ function LoginPage() {
       <div className="relative hidden lg:flex flex-col justify-between overflow-hidden bg-sidebar p-12 text-sidebar-foreground">
         <div className="absolute inset-0 -z-10 opacity-70">
           <div className="absolute -top-24 -left-24 size-[520px] rounded-full bg-primary/30 blur-3xl" />
-          <div className="absolute right-0 bottom-0 size-[460px] rounded-full bg-rose-gold/25 blur-3xl" />
+          <div className="absolute right-0 bottom-0 size-[460px] rounded-full bg-accent/40 blur-3xl" />
         </div>
         <Link to="/" className="flex items-center gap-2">
           <div className="grid size-9 place-items-center rounded-xl bg-gradient-luxe text-white shadow-luxe">
@@ -102,7 +102,7 @@ function LoginPage() {
           <div className="font-display text-lg font-semibold">Recepta</div>
         </Link>
         <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-glow">
+          <div className="text-xs font-semibold uppercase tracking-[0.2em] text-teal-glow">
             Salon Owner Portal
           </div>
           <h1 className="mt-4 font-display text-4xl font-semibold leading-tight">

@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// AuroraBackground — slow-drifting cream + peach blobs.
+// AuroraBackground — slow-drifting cream + teal blobs.
 //
 // Replaces the static blob div currently in the hero. Three blobs, each on
 // its own loop with a different period so they never line up. Low opacity,
@@ -28,7 +28,7 @@ export function AuroraBackground({ className }: AuroraBackgroundProps) {
         aria-hidden="true"
         style={{
           backgroundImage:
-            "radial-gradient(520px circle at 33% 10%, oklch(0.92 0.05 165 / 0.4), transparent 60%), radial-gradient(400px circle at 100% 40%, oklch(0.93 0.06 70 / 0.35), transparent 60%)",
+            "radial-gradient(520px circle at 33% 10%, oklch(0.92 0.05 195 / 0.4), transparent 60%), radial-gradient(400px circle at 100% 40%, oklch(0.93 0.04 75 / 0.35), transparent 60%)",
         }}
       />
     );
@@ -44,7 +44,7 @@ export function AuroraBackground({ className }: AuroraBackgroundProps) {
         size={520}
         topPct={-10}
         leftPct={33}
-        color="oklch(0.92 0.05 165 / 0.4)" // muted green
+        color="oklch(0.92 0.05 195 / 0.4)" // muted green
         duration={DURATION.slow * 14}
         offsetX={60}
         offsetY={30}
@@ -53,7 +53,7 @@ export function AuroraBackground({ className }: AuroraBackgroundProps) {
         size={400}
         topPct={30}
         leftPct={100}
-        color="oklch(0.93 0.06 70 / 0.35)" // soft peach
+        color="oklch(0.93 0.04 75 / 0.35)" // soft warm cream
         duration={DURATION.slow * 18}
         offsetX={-50}
         offsetY={40}

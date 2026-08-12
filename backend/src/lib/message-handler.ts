@@ -17,8 +17,9 @@ import {
   isGroupChat,
 } from './db';
 import { isTrialExpired } from './trial';
-import { generateReply } from './llm';
+import { generateReply, type BotIntent } from './llm';
 import { processBookingDecision } from './booking';
+import { postProcessReply } from './post-process';
 import { childLogger } from './logger';
 
 // ---------------------------------------------------------------------------
@@ -319,6 +320,13 @@ async function handleIncomingMessageInner(
   let customerId: string | null = null;
 
   // Steps 1–3: customer lookup, conversation lookup, state update
+  //
+  // Hoisted outside the try: detectMedicalConcern(text) is also used by
+  // postProcessReply (Stage 14) to decide whether to substitute the
+  // medical-specific fallback. The check itself is cheap and best-effort
+  // — failure is non-fatal and logged inside recordEscalation.
+  const isMedicalConcern = detectMedicalConcern(text);
+
   try {
     customerId = await getOrCreateCustomer(customerPhone);
     conversationId = await getOrCreateConversation(businessId, customerId);
@@ -358,7 +366,20 @@ async function handleIncomingMessageInner(
     // the alert when triaging.
     //
     // Best-effort — failure here is non-fatal, logged inside recordEscalation.
-    if (detectMedicalConcern(text)) {
+    //
+    // The boolean result is also threaded into postProcessReply below so
+    // that when the LLM's escalation reply is overridden (complaint
+    // trigger disabled), the post-processor can substitute the
+    // medical-specific fallback ("I can't diagnose, but I can book a
+    // regular manicure") instead of the generic "tell me what you're
+    // looking for" — which would read as a non-answer to a customer
+    // describing a real symptom.
+    //
+    // Uses the outer `isMedicalConcern` declared above the try (hoisted
+    // out so the LLM-call block can read it). If persistence failed and
+    // we never got here, isMedicalConcern is still defined from the
+    // initial check at line 328.
+    if (isMedicalConcern) {
       await recordEscalation(conversationId, 'medical_concern', text);
       requestLog.info(
         { conversationId, textPreview: text.slice(0, 80) },
@@ -420,18 +441,58 @@ async function handleIncomingMessageInner(
       upcomingAppointmentPrompt,
     });
 
+    // Step 5b-prime: post-process the LLM reply.
+    // The LLM has strong training priors that compete with our prompt:
+    // "customer is upset → escalate" and "booking follow-up → mention a
+    // date+time+service". When the owner has DISABLED escalation triggers
+    // the LLM still escalates anyway; when there's no real booking the
+    // LLM hallucinates specific dates and services. The post-processor
+    // is a HARD GUARD that runs after the LLM and overrides these
+    // behaviors. Only the post-processed reply is sent AND persisted —
+    // raw LLM text never lands in messages, conversation_state, or
+    // escalation_events (see Stage 11 persistence audit).
+    //
+    // Runs BEFORE escalation recording so the recorded ai_draft_response
+    // reflects what the customer actually sees.
+    const postProcessed = postProcessReply({
+      reply: llmResult.reply,
+      intent: llmResult.intent,
+      enabledTriggers: salonContext.enabledTriggers,
+      customerText: text,
+      upcomingAppointmentContext: upcomingAppointmentPrompt,
+      conversationStateContext: conversationStatePrompt,
+      salonServiceNames: salonContext.services.map((s) => s.name),
+      isMedicalConcern,
+    });
+    if (postProcessed.overridden) {
+      requestLog.info(
+        {
+          originalIntent: llmResult.intent,
+          finalIntent: postProcessed.intent,
+          redactedSegments: postProcessed.redactedSegments,
+        },
+        '[post-process] reply overridden by guard'
+      );
+    }
+
     // Step 5b: escalation — record an escalation_events row when the
     // LLM flags intent='complaint' or when its confidence is so low
     // (and the intent isn't a booking action) that the salon owner
     // should probably step in. Dashboard reads from this table but
     // nothing was writing to it until now.
+    //
+    // Important: when the post-processor has already overridden the
+    // intent (e.g. flipped 'complaint' → 'other' because triggers are
+    // empty), we use the POST-PROCESSED intent + reply here. This
+    // prevents the rejected LLM text from leaking into the escalation
+    // row's ai_draft_response column.
     if (conversationId) {
       try {
-        if (llmResult.intent === 'complaint') {
+        if (postProcessed.intent === 'complaint') {
           await recordEscalation(
             conversationId,
             'customer_complaint',
-            llmResult.reply
+            postProcessed.reply
           );
           requestLog.info(
             { conversationId },
@@ -439,12 +500,12 @@ async function handleIncomingMessageInner(
           );
         } else if (
           llmResult.confidence < 30 &&
-          !['book', 'cancel', 'reschedule'].includes(llmResult.intent)
+          !['book', 'cancel', 'reschedule'].includes(postProcessed.intent)
         ) {
           await recordEscalation(
             conversationId,
             'low_confidence',
-            llmResult.reply
+            postProcessed.reply
           );
           requestLog.info(
             { conversationId, confidence: llmResult.confidence },
@@ -461,8 +522,27 @@ async function handleIncomingMessageInner(
     }
 
     // Step 6: booking decision (only if we have a conversationId for state writes)
+    //
+    // `effectiveLlmResult` carries the POST-PROCESSED reply and intent
+    // through to the booking decision. If the post-processor overrode
+    // the LLM's escalation language, the booking decision sees the
+    // cleaned-up reply (so a confirmation summary chains onto "I'll
+    // help you directly" rather than the rejected "Yeh sun ke...").
+    // If the post-processor flipped intent from 'complaint' to
+    // 'other', the booking decision treats it as a non-booking flow
+    // (correct — escalation and booking are mutually exclusive).
+    const effectiveLlmResult = {
+      ...llmResult,
+      reply: postProcessed.reply,
+      // postProcessed.intent is a valid BotIntent: either the original
+      // LLM-classified intent (already validated by clampIntent) or
+      // 'other' (when Rule A overrides complaint → other). Cast to
+      // satisfy processBookingDecision's typed parameter.
+      intent: postProcessed.intent as BotIntent,
+    };
+
     if (conversationId && customerId) {
-      const decision = await processBookingDecision(llmResult, {
+      const decision = await processBookingDecision(effectiveLlmResult, {
         businessId,
         customerId,
         conversationId,
@@ -504,8 +584,10 @@ async function handleIncomingMessageInner(
         }
       }
     } else {
-      // No conversation (persistence failed) — use LLM reply verbatim
-      finalReply = llmResult.reply;
+      // No conversation (persistence failed) — use the post-processed
+      // LLM reply so we never send the raw (potentially escalated /
+      // hallucinated) text even in degraded mode.
+      finalReply = effectiveLlmResult.reply;
     }
   } catch (e) {
     requestLog.error(
