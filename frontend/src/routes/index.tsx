@@ -21,9 +21,10 @@ import { cn } from "@/lib/utils";
 import {
   AuroraBackground,
   FadeIn,
-  HeroProductDemo,
+  HeroDashboardPreview,
   HoverCard,
   MagneticButton,
+  ProductTour,
   Reveal,
   ScrollProgress,
   SectionReveal,
@@ -57,10 +58,13 @@ export const Route = createFileRoute("/")({
 
 function LandingPage() {
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div
+      className="min-h-screen text-foreground bg-[linear-gradient(180deg,oklch(0.965_0.025_195_/_0.6)_0%,oklch(0.975_0.018_75)_8%,oklch(0.985_0.012_75)_25%,oklch(0.992_0.008_75)_55%,oklch(0.997_0.004_75)_80%,oklch(1_0_0)_100%)]"
+    >
       <ScrollProgress />
       <Nav />
       <Hero />
+      <ProductTour />
       <Features />
       <HowItWorks />
       <Pricing />
@@ -74,7 +78,7 @@ function LandingPage() {
 // Navbar — entrance + scroll-state compaction + shared layout indicator
 // ---------------------------------------------------------------------------
 
-const NAV_SECTIONS = ["features", "how-it-works", "pricing", "faq"] as const;
+const NAV_SECTIONS = ["product", "features", "how-it-works", "pricing", "faq"] as const;
 type NavSection = (typeof NAV_SECTIONS)[number];
 
 function Nav() {
@@ -161,11 +165,11 @@ function NavLink({ id, active }: { id: NavSection; active: boolean }) {
 
 function Hero() {
   return (
-    <section className="relative overflow-hidden bg-gradient-warm">
-      {/* Ambient background — slow-drifting cream + peach + green blobs. */}
+    <section className="relative overflow-hidden">
+      {/* Ambient background — slow-drifting cream + teal + warm blobs. */}
       <AuroraBackground className="absolute inset-0 -z-10" />
 
-      <div className="mx-auto grid max-w-7xl gap-14 px-6 py-20 lg:grid-cols-[1.05fr_0.95fr] lg:py-28">
+      <div className="mx-auto grid max-w-7xl gap-10 px-6 py-20 lg:grid-cols-[0.7fr_1.3fr] lg:gap-12 lg:py-24">
         <div className="flex flex-col justify-center">
           <FadeIn delay={0}>
             <Badge className="w-fit rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
@@ -244,9 +248,19 @@ function Hero() {
           </FadeIn>
         </div>
 
-        {/* Right column: simulated WhatsApp + booking demo. */}
+        {/* Right column: actual Recepta Owner Dashboard preview.
+            Renders real components (Card, Recharts) with deterministic demo
+            data so a logged-out visitor sees exactly what the logged-in
+            product looks like. See HeroDashboardPreview.tsx for the
+            no-backend rendering contract. */}
         <FadeIn delay={0.35} y={20}>
-          <HeroProductDemo />
+          <div>
+            <div className="mb-4 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-primary">
+              <span className="size-1.5 rounded-full bg-primary" />
+              See Recepta in action
+            </div>
+            <HeroDashboardPreview />
+          </div>
         </FadeIn>
       </div>
     </section>
@@ -290,7 +304,7 @@ function Features() {
   ];
 
   return (
-    <section id="features" className="border-y border-border/60 bg-background">
+    <section id="features" className="relative">
       <div className="mx-auto max-w-7xl px-6 py-24">
         <SectionReveal
           cadence={0.1}
@@ -616,7 +630,7 @@ function HowItWorks() {
   ];
 
   return (
-    <section id="how-it-works" className="bg-background">
+    <section id="how-it-works" className="relative">
       <div className="mx-auto max-w-7xl px-6 py-24">
         <SectionReveal
           cadence={0.1}
@@ -638,6 +652,11 @@ function HowItWorks() {
           }
         />
 
+        {/* Sticky scroll-driven timeline.
+            The outer container provides 4 viewport-heights of scroll space
+            (one per step). The inner pane is sticky so the 2-column grid
+            stays in view while the user scrolls through each step interval.
+            The Timeline component measures progress against the outer ref. */}
         <Timeline steps={steps} />
       </div>
     </section>
@@ -648,10 +667,32 @@ function Timeline({ steps }: { steps: HowItWorksStep[] }) {
   const prefersReducedMotion = useReducedMotion();
   const sectionRef = useRef<HTMLDivElement>(null);
 
-  // Section-scoped scroll progress: 0 when the section's top reaches the
-  // bottom of the viewport, 1 when the section's bottom reaches the top.
-  // This guarantees the ramp hits 1 by the time the section exits, so
-  // step 4 can always become active.
+  // ---------------------------------------------------------------------
+  // SCROLL-DRIVEN STEP PROGRESSION (read carefully before changing)
+  // ---------------------------------------------------------------------
+  //
+  // The page's natural scroll position is the source of truth. We never
+  // intercept wheel/touch events, never lock body overflow, never call
+  // scrollTo() to force progression. The user remains in full control.
+  //
+  // Layout: a 300vh outer container holds a sticky inner pane that pins
+  // the 2-column grid in view. As the user scrolls naturally, Motion's
+  // useScroll reports a normalized progress 0→1 across the entire 300vh
+  // traversal (offset ["start end", "end start"]), with each step
+  // receiving ~75-100vh of natural scroll — enough for the user to read
+  // the title, description, and preview before the active step advances.
+  //
+  // Why ["start end", "end start"] instead of ["start start", "end end"]:
+  //   "start start" / "end end" maps progress to the *sticky-held window*
+  //   (200vh with 300vh outer), giving each step only ~50vh of scroll.
+  //   That's too tight — a single mouse-wheel kick crosses a boundary.
+  //   "start end" / "end start" maps to the *entire 300vh traversal*,
+  //   giving each step 75-100vh of natural scroll — comfortable.
+  //
+  // Active step = Math.floor(progress * 4), clamped to [0, 3]. Motion
+  // already clamps progress to [0, 1] internally (verified in
+  // motion-dom offsets/index.mjs) so this is safe.
+  // ---------------------------------------------------------------------
   const { scrollYProgress } = useScroll({
     target: sectionRef,
     offset: ["start end", "end start"],
@@ -662,13 +703,35 @@ function Timeline({ steps }: { steps: HowItWorksStep[] }) {
 
   // Active step index — derived deterministically from scrollYProgress so
   // steps activate 0 → 1 → 2 → 3 in strict sequence with no skips.
-  // We use a tiny epsilon on the upper bound so progress=1 still maps to
-  // the last step (instead of stepping past it).
   const activeIndexMV = useTransform(
     scrollYProgress,
-    (p) => Math.min(steps.length - 1, Math.floor(p * steps.length)),
+    (p) => Math.min(steps.length - 1, Math.max(0, Math.floor(p * steps.length))),
   );
-  const [activeIdx, setActiveIdx] = useState(0);
+
+  // Initialize activeIdx from the actual scroll position so we don't flash
+  // Step 1 on a mid-section page load. Read window.scrollY synchronously
+  // and compute progress against the section's bounding rect. If the ref
+  // isn't hydrated yet (SSR), fall back to 0 (Step 1).
+  const [activeIdx, setActiveIdx] = useState<number>(() => {
+    if (typeof window === "undefined") return 0;
+    const el = sectionRef.current;
+    if (!el) return 0;
+    const rect = el.getBoundingClientRect();
+    const winH = window.innerHeight;
+    const elTop = rect.top + window.scrollY;
+    const elHeight = rect.height;
+    // Replicate offset ["start end", "end start"]:
+    //   progress = 0 when scrollY = elTop - winH (section just below viewport)
+    //   progress = 1 when scrollY = elTop + elHeight (section just above viewport)
+    const start = elTop - winH;
+    const end = elTop + elHeight;
+    const range = end - start;
+    if (range <= 0) return 0;
+    const raw = (window.scrollY - start) / range;
+    const clamped = Math.max(0, Math.min(1, raw));
+    return Math.min(steps.length - 1, Math.max(0, Math.floor(clamped * steps.length)));
+  });
+
   useEffect(() => {
     if (prefersReducedMotion) return;
     const unsub = activeIndexMV.on("change", (v) => setActiveIdx(v));
@@ -676,9 +739,18 @@ function Timeline({ steps }: { steps: HowItWorksStep[] }) {
   }, [activeIndexMV, prefersReducedMotion]);
 
   return (
-    <div ref={sectionRef} className="relative mt-16 grid gap-10 md:grid-cols-[1fr_2fr]">
-      {/* Left column: timeline (numbered circles on the line + content) */}
-      <ol className="relative">
+    // Outer scroll-distance container. 300vh = ~4 viewport-heights of
+    // scroll space — divided evenly across 4 steps via Math.floor below.
+    // The ref lives here so useScroll measures the entire scroll range.
+    <div ref={sectionRef} className="relative mt-16" style={{ height: "300vh" }}>
+      {/* Sticky inner pane — keeps the 2-column grid pinned in view while
+          the user scrolls through each step's interval. Top-aligned so
+          Step 1 sits near the top of the viewport when the sticky first
+          engages; py-12 keeps clear breathing room from the nav. */}
+      <div className="sticky top-0 flex h-screen items-start py-12 md:py-16">
+        <div className="w-full grid gap-10 md:grid-cols-[1fr_2fr]">
+          {/* Left column: timeline (numbered circles on the line + content) */}
+          <ol className="relative">
         {/* Background line (unfilled portion). Sits in its own column thanks
             to the grid below. transform-origin: top so it grows downward.
             Horizontal offset: each row's circle column is 56px wide with a
@@ -739,6 +811,8 @@ function Timeline({ steps }: { steps: HowItWorksStep[] }) {
 
       {/* Right column: per-step visual. Cross-fades based on the same activeIdx. */}
       <TimelineVisual steps={steps} activeIdx={activeIdx} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -1131,7 +1205,7 @@ function Pricing() {
   ];
 
   return (
-    <section id="pricing" className="border-t border-border/60 bg-background">
+    <section id="pricing" className="relative">
       <div className="mx-auto max-w-7xl px-6 py-24">
         <SectionReveal
           cadence={0.1}
@@ -1287,7 +1361,7 @@ function Faq() {
   const [openIdx, setOpenIdx] = useState<number | null>(0);
 
   return (
-    <section id="faq" className="bg-background">
+    <section id="faq" className="relative">
       <div className="mx-auto max-w-3xl px-6 py-24">
         <SectionReveal
           cadence={0.1}
@@ -1409,7 +1483,7 @@ function AccordionRow({
 function Footer() {
   return (
     <FadeIn>
-      <footer className="border-t border-border/60 bg-background">
+      <footer className="relative">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-6 py-8">
           <div className="flex items-center gap-2">
             <div className="grid size-8 place-items-center rounded-lg bg-gradient-luxe text-white">
