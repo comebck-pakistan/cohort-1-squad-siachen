@@ -425,7 +425,7 @@ function CalendarCard({ data, reduced }: { data: DemoData; reduced: boolean }) {
                 <div className="text-xs uppercase tracking-widest text-muted-foreground">Tomorrow</div>
                 <div className="font-display text-xl font-semibold">Fri 25 Jul</div>
               </div>
-              <div className="rounded-full bg-emerald-glow/15 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-primary">
+              <div className="rounded-full bg-teal-glow/15 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-primary">
                 12 bookings
               </div>
             </div>
@@ -474,11 +474,11 @@ function CalendarRowItem({
   // booking row is the ONLY thing that visually reacts.
   const borderColor =
     highlight === "booked"
-      ? "oklch(0.55 0.13 165 / 0.55)"
+      ? "oklch(0.45 0.10 195 / 0.55)"
       : highlight === "selected"
-      ? "oklch(0.55 0.13 165 / 0.45)"
+      ? "oklch(0.45 0.10 195 / 0.45)"
       : highlight === "offered"
-      ? "oklch(0.55 0.13 165 / 0.22)"
+      ? "oklch(0.45 0.10 195 / 0.22)"
       : "oklch(0.85 0.01 70 / 0.6)";
 
   return (
@@ -498,7 +498,7 @@ function CalendarRowItem({
               // staying loudly lit.
               backgroundColor:
                 highlight === "booked"
-                  ? "oklch(0.97 0.03 165 / 0.5)"
+                  ? "oklch(0.94 0.04 195 / 0.5)"
                   : "oklch(0.99 0.005 90 / 0.4)",
             }
       }
@@ -547,10 +547,10 @@ interface CalendarRow {
 
 const CALENDAR_ROWS: CalendarRow[] = [
   { time: "10:00", service: "Women's Cut", stylist: "Sana K.", price: "Rs. 3,500", color: "bg-primary/10 text-primary" },
-  { time: "12:30", service: "Gel Manicure", stylist: "Hira M.", price: "Rs. 2,800", color: "bg-rose-gold/20 text-[color:var(--rose-gold)]" },
+  { time: "12:30", service: "Gel Manicure", stylist: "Hira M.", price: "Rs. 2,800", color: "bg-accent/40 text-accent-foreground" },
   { time: "2:00",  service: "Hair Colour", stylist: "Zara A.", price: "Rs. 9,500", color: "bg-primary/10 text-primary" },
-  { time: "5:30",  service: "HydraFacial", stylist: "New · WhatsApp", price: "Rs. 6,500", color: "bg-emerald-glow/15 text-primary", ai: true },
-  { time: "7:00",  service: "Threading", stylist: "Mehak R.", price: "Rs. 1,200", color: "bg-rose-gold/20 text-[color:var(--rose-gold)]" },
+  { time: "5:30",  service: "HydraFacial", stylist: "New · WhatsApp", price: "Rs. 6,500", color: "bg-teal-glow/15 text-primary", ai: true },
+  { time: "7:00",  service: "Threading", stylist: "Mehak R.", price: "Rs. 1,200", color: "bg-accent/40 text-accent-foreground" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -688,9 +688,9 @@ function SlotChip({
           ? {
               scale: [1, 1.04, 1],
               boxShadow: [
-                "0 0 0 0px oklch(0.55 0.13 165 / 0)",
-                "0 0 0 3px oklch(0.55 0.13 165 / 0.18)",
-                "0 0 0 0px oklch(0.55 0.13 165 / 0)",
+                "0 0 0 0px oklch(0.45 0.10 195 / 0)",
+                "0 0 0 3px oklch(0.45 0.10 195 / 0.18)",
+                "0 0 0 0px oklch(0.45 0.10 195 / 0)",
               ],
             }
           : {}

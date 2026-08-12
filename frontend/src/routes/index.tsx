@@ -441,9 +441,9 @@ function SlotsDemo() {
                 : {
                     backgroundColor:
                       status === "confirmed"
-                        ? "oklch(0.55 0.13 165 / 0.92)"
+                        ? "oklch(0.45 0.10 195 / 0.92)"
                         : status === "selected"
-                        ? "oklch(0.55 0.13 165 / 0.55)"
+                        ? "oklch(0.45 0.10 195 / 0.55)"
                         : "oklch(0.92 0.02 70)",
                     color:
                       status === "available"
@@ -494,7 +494,7 @@ function InboxDemo() {
               ? {}
               : {
                   backgroundColor: unread
-                    ? "oklch(0.55 0.13 165 / 0.15)"
+                    ? "oklch(0.45 0.10 195 / 0.15)"
                     : "oklch(0.95 0.01 70)",
                   opacity: unread ? 1 : 0.7,
                 }
@@ -548,7 +548,7 @@ function PauseDemo() {
           aria-hidden="true"
           className="relative h-4 w-8 rounded-full"
           animate={{
-            backgroundColor: active ? "oklch(0.55 0.13 165 / 0.85)" : "oklch(0.85 0.05 70 / 0.6)",
+            backgroundColor: active ? "oklch(0.45 0.10 195 / 0.85)" : "oklch(0.85 0.05 70 / 0.6)",
           }}
           transition={{ duration: DURATION.standard, ease: EASE.standard }}
         >
@@ -561,7 +561,7 @@ function PauseDemo() {
       </div>
       <motion.span
         animate={{
-          color: active ? "oklch(0.4 0.13 165)" : "oklch(0.5 0.02 40)",
+          color: active ? "oklch(0.42 0.10 195)" : "oklch(0.5 0.02 40)",
         }}
         transition={{ duration: DURATION.standard, ease: EASE.standard }}
         className="font-sans font-semibold"
@@ -892,9 +892,9 @@ function SignUpVisual({ playKey }: { playKey: number }) {
           type="button"
           aria-label="Create account"
           animate={{
-            backgroundColor: phase === 2 ? "oklch(0.55 0.13 165 / 0.85)" : "oklch(0.99 0.005 90)",
+            backgroundColor: phase === 2 ? "oklch(0.45 0.10 195 / 0.85)" : "oklch(0.99 0.005 90)",
             color: phase === 2 ? "oklch(0.99 0.005 90)" : "oklch(0.4 0.02 40)",
-            borderColor: phase === 2 ? "oklch(0.55 0.13 165 / 0.85)" : "oklch(0.85 0.01 70)",
+            borderColor: phase === 2 ? "oklch(0.45 0.10 195 / 0.85)" : "oklch(0.85 0.01 70)",
           }}
           transition={{ duration: DURATION.standard, ease: EASE.standard }}
           className="rounded-full border px-3 py-1 text-[11px] font-semibold"
@@ -976,10 +976,10 @@ function PairingVisual({ playKey }: { playKey: number }) {
           aria-hidden="true"
           animate={{
             borderColor: connected
-              ? "oklch(0.55 0.13 165 / 0.7)"
+              ? "oklch(0.45 0.10 195 / 0.7)"
               : "oklch(0.85 0.01 70 / 0.6)",
             backgroundColor: connected
-              ? "oklch(0.55 0.13 165 / 0.08)"
+              ? "oklch(0.45 0.10 195 / 0.08)"
               : "oklch(0.99 0.005 90 / 0.6)",
           }}
           transition={{ duration: DURATION.standard, ease: EASE.standard }}

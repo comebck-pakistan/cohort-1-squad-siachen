@@ -75,7 +75,7 @@ const statusMeta: Record<
   ready: {
     label: "WhatsApp connected",
     className:
-      "bg-success-soft text-[oklch(0.35_0.12_145)] border-transparent",
+      "bg-success-soft text-[oklch(0.42_0.10_195)] border-transparent",
     description:
       "Customers who message your number now reach the AI receptionist.",
   },
@@ -401,7 +401,7 @@ function CloudOnboarding({
               <Badge
                 className={
                   isReady
-                    ? "bg-success-soft text-[oklch(0.35_0.12_145)] border-transparent"
+                    ? "bg-success-soft text-[oklch(0.42_0.10_195)] border-transparent"
                     : "bg-warning-soft text-[oklch(0.35_0.1_70)] border-transparent"
                 }
               >

@@ -5,7 +5,7 @@ import type { BillingStatus } from "@/types";
 const map: Record<BillingStatus, { label: string; className: string }> = {
   active: {
     label: "Active",
-    className: "bg-success-soft text-[oklch(0.35_0.12_145)] border-transparent",
+    className: "bg-success-soft text-[oklch(0.42_0.10_195)] border-transparent",
   },
   grace_period: {
     label: "Grace period",
@@ -37,7 +37,7 @@ export function TierBadge({ tier }: { tier: "basic" | "pro" | "business" }) {
 
 export function PaymentStatusBadge({ status }: { status: "paid" | "pending" | "failed" }) {
   const styles = {
-    paid: "bg-success-soft text-[oklch(0.35_0.12_145)]",
+    paid: "bg-success-soft text-[oklch(0.42_0.10_195)]",
     pending: "bg-warning-soft text-[oklch(0.35_0.1_70)]",
     failed: "bg-danger-soft text-[oklch(0.4_0.18_27)]",
   } as const;

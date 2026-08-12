@@ -1248,7 +1248,7 @@ function AgentToggle({ businessId }: { businessId: string }) {
                 trialExpired
                   ? "bg-warning-soft text-[oklch(0.45_0.14_70)]"
                   : active
-                    ? "bg-success-soft text-[oklch(0.35_0.12_145)]"
+                    ? "bg-success-soft text-[oklch(0.42_0.10_195)]"
                     : "bg-warning-soft text-[oklch(0.35_0.1_70)]"
               }`}
             >

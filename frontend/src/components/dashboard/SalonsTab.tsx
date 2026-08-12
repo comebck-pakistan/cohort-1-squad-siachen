@@ -47,7 +47,7 @@ function TrialBadge({
 }) {
   if (status === "converted") {
     return (
-      <Badge className="bg-success-soft text-[oklch(0.35_0.12_145)] border-transparent gap-1">
+      <Badge className="bg-success-soft text-[oklch(0.42_0.10_195)] border-transparent gap-1">
         <CheckCheck className="size-3" /> Paid
       </Badge>
     );

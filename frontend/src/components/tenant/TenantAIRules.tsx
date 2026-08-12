@@ -485,7 +485,7 @@ function Sandbox({
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-[oklch(0.985_0.003_200)]">
+        <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-background">
           {msgs.map((m, i) => (
             <div
               key={i}

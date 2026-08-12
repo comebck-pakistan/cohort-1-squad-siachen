@@ -295,7 +295,7 @@ function OverviewTab() {
               </div>
               <span className={cn(
                 "rounded-full px-2 py-0.5 text-[10px] font-semibold",
-                m.up ? "bg-success-soft text-success" : "bg-rose-gold-soft text-[color:var(--rose-gold)]",
+                m.up ? "bg-success-soft text-success" : "bg-accent text-accent-foreground",
               )}>
                 {m.trend}
               </span>
@@ -321,12 +321,12 @@ function OverviewTab() {
             <AreaChart data={chartData} margin={{ left: -20, right: 8, top: 8 }}>
               <defs>
                 <linearGradient id="callsFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="var(--color-emerald-glow)" stopOpacity={0.5} />
-                  <stop offset="100%" stopColor="var(--color-emerald-glow)" stopOpacity={0} />
+                  <stop offset="0%" stopColor="var(--color-teal-glow)" stopOpacity={0.5} />
+                  <stop offset="100%" stopColor="var(--color-teal-glow)" stopOpacity={0} />
                 </linearGradient>
                 <linearGradient id="bookedFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="var(--color-rose-gold)" stopOpacity={0.4} />
-                  <stop offset="100%" stopColor="var(--color-rose-gold)" stopOpacity={0} />
+                  <stop offset="0%" stopColor="var(--color-chart-2)" stopOpacity={0.4} />
+                  <stop offset="100%" stopColor="var(--color-chart-2)" stopOpacity={0} />
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
@@ -345,7 +345,7 @@ function OverviewTab() {
                 type="monotone"
                 dataKey="calls"
                 name="Calls"
-                stroke="var(--color-emerald-glow)"
+                stroke="var(--color-teal-glow)"
                 strokeWidth={2}
                 fill="url(#callsFill)"
               />
@@ -353,7 +353,7 @@ function OverviewTab() {
                 type="monotone"
                 dataKey="booked"
                 name="AI Bookings"
-                stroke="var(--color-rose-gold)"
+                stroke="var(--color-chart-2)"
                 strokeWidth={2}
                 fill="url(#bookedFill)"
               />

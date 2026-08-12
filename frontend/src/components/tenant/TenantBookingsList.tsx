@@ -41,7 +41,7 @@ import { cn } from "@/lib/utils";
 
 const statusStyle: Record<AppointmentRow["status"], string> = {
   pending: "bg-warning-soft text-[oklch(0.35_0.1_70)] border-transparent",
-  confirmed: "bg-success-soft text-[oklch(0.35_0.12_145)] border-transparent",
+  confirmed: "bg-success-soft text-[oklch(0.42_0.10_195)] border-transparent",
   completed: "bg-muted text-muted-foreground border-transparent",
   cancelled: "bg-danger-soft text-[oklch(0.4_0.18_27)] border-transparent",
   no_show: "bg-danger-soft text-[oklch(0.4_0.18_27)] border-transparent",
@@ -327,7 +327,7 @@ function BookingRow({ appt, onMutated }: { appt: AppointmentRow; onMutated: () =
               variant="outline"
               disabled={patch.isPending}
               onClick={() => patch.mutate({ status: "completed" })}
-              className="border-[oklch(0.55_0.15_145)] text-[oklch(0.35_0.12_145)] hover:bg-success-soft"
+              className="border-[oklch(0.55_0.11_195)] text-[oklch(0.42_0.10_195)] hover:bg-success-soft"
             >
               <CheckCircle2 className="size-4" /> Complete
             </Button>
@@ -366,7 +366,7 @@ function StatCard({
 }) {
   const toneClass: Record<typeof tone, string> = {
     warning: "bg-warning-soft text-[oklch(0.35_0.1_70)]",
-    success: "bg-success-soft text-[oklch(0.35_0.12_145)]",
+    success: "bg-success-soft text-[oklch(0.42_0.10_195)]",
     muted: "bg-muted text-muted-foreground",
     danger: "bg-danger-soft text-[oklch(0.4_0.18_27)]",
   };

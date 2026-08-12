@@ -43,9 +43,9 @@ import { useTenantBusinessId } from "@/lib/useTenantBusinessId";
 // ---------------------------------------------------------------------------
 
 const intentColors: Record<string, string> = {
-  Bookings: "oklch(0.6 0.12 175)",
+  Bookings: "oklch(0.55 0.11 195)",
   Pricing: "oklch(0.72 0.15 70)",
-  "Timings/Location": "oklch(0.65 0.14 220)",
+  "Timings/Location": "oklch(0.72 0.10 195)",
   Escalations: "oklch(0.6 0.22 27)",
 };
 
@@ -206,18 +206,18 @@ export function TenantOverview() {
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={hourly}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="oklch(0.92 0.008 220)" />
-                    <XAxis dataKey="h" stroke="oklch(0.5 0.02 250)" fontSize={12} />
-                    <YAxis stroke="oklch(0.5 0.02 250)" fontSize={12} />
+                    <CartesianGrid strokeDasharray="3 3" stroke="oklch(0.92 0.01 70)" />
+                    <XAxis dataKey="h" stroke="oklch(0.5 0.02 40)" fontSize={12} />
+                    <YAxis stroke="oklch(0.5 0.02 40)" fontSize={12} />
                     <Tooltip
                       contentStyle={{
                         background: "white",
-                        border: "1px solid oklch(0.92 0.008 220)",
+                        border: "1px solid oklch(0.92 0.01 70)",
                         borderRadius: 8,
                         fontSize: 12,
                       }}
                     />
-                    <Bar dataKey="c" fill="oklch(0.6 0.12 175)" radius={[6, 6, 0, 0]} />
+                    <Bar dataKey="c" fill="oklch(0.55 0.11 195)" radius={[6, 6, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               )}
@@ -260,7 +260,7 @@ export function TenantOverview() {
                     <Tooltip
                       contentStyle={{
                         background: "white",
-                        border: "1px solid oklch(0.92 0.008 220)",
+                        border: "1px solid oklch(0.92 0.01 70)",
                         borderRadius: 8,
                         fontSize: 12,
                       }}
@@ -303,7 +303,7 @@ export function TenantOverview() {
                   <div
                     className={
                       f.tone === "success"
-                        ? "size-8 rounded-md grid place-items-center shrink-0 bg-success-soft text-[oklch(0.35_0.12_145)]"
+                        ? "size-8 rounded-md grid place-items-center shrink-0 bg-success-soft text-[oklch(0.42_0.10_195)]"
                         : f.tone === "warn"
                           ? "size-8 rounded-md grid place-items-center shrink-0 bg-warning-soft text-[oklch(0.35_0.1_70)]"
                           : "size-8 rounded-md grid place-items-center shrink-0 bg-muted text-muted-foreground"

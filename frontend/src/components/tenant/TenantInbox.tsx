@@ -52,7 +52,7 @@ import {
 type Intent = "Booking Request" | "Price Inquiry" | "Escalation" | "Timings" | "Other";
 
 const intentColor: Record<Intent, string> = {
-  "Booking Request": "bg-success-soft text-[oklch(0.35_0.12_145)] border-transparent",
+  "Booking Request": "bg-success-soft text-[oklch(0.42_0.10_195)] border-transparent",
   "Price Inquiry": "bg-accent text-accent-foreground border-transparent",
   Escalation: "bg-danger-soft text-[oklch(0.4_0.18_27)] border-transparent",
   Timings: "bg-warning-soft text-[oklch(0.35_0.1_70)] border-transparent",
@@ -330,7 +330,7 @@ export function TenantInbox() {
   });
 
   return (
-    <div className="h-[calc(100vh-4rem)] grid grid-cols-1 lg:grid-cols-[320px_1fr_320px] bg-[oklch(0.985_0.003_200)]">
+    <div className="h-[calc(100vh-4rem)] grid grid-cols-1 lg:grid-cols-[320px_1fr_320px] bg-background">
       {/* List column */}
       <div className="border-r bg-white flex flex-col min-h-0">
         <div className="p-4 border-b space-y-3">
@@ -441,7 +441,7 @@ export function TenantInbox() {
                         {reasonLabel(c.latestEscalationReason) ?? c.intent}
                       </Badge>
                       {subTab === "resolved" && (
-                        <Badge className="text-[10px] font-medium bg-success-soft text-[oklch(0.35_0.12_145)] border-transparent">
+                        <Badge className="text-[10px] font-medium bg-success-soft text-[oklch(0.42_0.10_195)] border-transparent">
                           Resolved
                         </Badge>
                       )}
@@ -490,7 +490,7 @@ export function TenantInbox() {
                 </Button>
               )}
               {subTab === "resolved" && (
-                <Badge className="bg-success-soft text-[oklch(0.35_0.12_145)] border-transparent">
+                <Badge className="bg-success-soft text-[oklch(0.42_0.10_195)] border-transparent">
                   <CheckCheck className="size-3 mr-1" /> Resolved
                 </Badge>
               )}
