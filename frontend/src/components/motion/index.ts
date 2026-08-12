@@ -13,4 +13,8 @@ export { AuroraBackground } from "./AuroraBackground";
 export { useActiveSection } from "./useActiveSection";
 export { useBoundedCycle } from "./useBoundedCycle";
 export { HeroProductDemo } from "./HeroProductDemo";
+export { HeroDashboardPreview } from "./HeroDashboardPreview";
 export { SmoothScroll } from "./SmoothScroll";
+export { ProductModuleShowcase, ProductDemoFrame, type ProductModule, type ProductModuleLayout } from "./ProductModuleShowcase";
+export { ProductDemoSequence, type SequencePhase, type ProductDemoSequenceProps } from "./ProductDemoSequence";
+export { ProductTour } from "./ProductTour";
