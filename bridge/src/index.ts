@@ -8,6 +8,7 @@ import { logger, childLogger } from './logger';
 import { SessionManager } from './session-manager';
 import { createOnboardingRouter } from './qr-server';
 import { fetchActiveBusinesses } from './bridge-client';
+import { createVoiceNoteTestRouter } from './__test__/voice-note';
 
 // ---------------------------------------------------------------------------
 // Recepta Bridge — entry point.
@@ -44,6 +45,32 @@ if (!process.env.BRIDGE_INTERNAL_TOKEN) {
   );
 }
 
+// Voice-note feature flag. When enabled, every WhatsAppWebClient will
+// accept incoming voice notes (msg.type === 'ptt' | 'audio'), download
+// the media, transcribe via Groq, and feed the transcript into the same
+// /api/bridge/inbound pipeline as typed text. Requires GROQ_API_KEY.
+const VOICE_NOTES_ENABLED = process.env.ENABLE_VOICE_NOTES === 'true';
+const GROQ_API_KEY_CONFIGURED = !!process.env.GROQ_API_KEY;
+const MAX_VOICE_PER_HOUR = Number(process.env.MAX_VOICE_PER_HOUR) || 5;
+const MAX_VOICE_DURATION_SEC = Number(process.env.MAX_VOICE_DURATION_SEC) || 120;
+
+if (VOICE_NOTES_ENABLED) {
+  log.info(
+    {
+      voiceNotesEnabled: true,
+      groqApiKeyConfigured: GROQ_API_KEY_CONFIGURED,
+      maxVoicePerHour: MAX_VOICE_PER_HOUR,
+      maxVoiceDurationSec: MAX_VOICE_DURATION_SEC,
+    },
+    'voice notes enabled'
+  );
+  if (!GROQ_API_KEY_CONFIGURED) {
+    log.error(
+      'voice_notes_enabled_but_no_groq_key — every voice note will fail with auth_error_fail_fast. Set GROQ_API_KEY or unset ENABLE_VOICE_NOTES.'
+    );
+  }
+}
+
 const app = express();
 app.use(
   cors({
@@ -63,6 +90,15 @@ const sessionManager = new SessionManager({ sessionsRoot: SESSIONS_ROOT });
 // before the move; only the host changed. Core API now proxies the same URLs
 // at /onboarding/* back into this router.
 app.use(createOnboardingRouter(sessionManager));
+
+// Local-dev test seam for the voice-note path. Mounted ONLY when not in
+// production — in prod the module is never imported, so the route is
+// unreachable. Use POST /__test/voice-note to drive the voice-note
+// pipeline end-to-end without a real WhatsApp device.
+if (process.env.NODE_ENV !== 'production') {
+  app.use('/__test', createVoiceNoteTestRouter());
+  log.info('voice-note test router mounted at /__test/voice-note (dev only)');
+}
 
 // Internal health endpoint. Returns bridge liveness + per-salon status
 // snapshot (handy for ops debugging without having to also hit the core API).
