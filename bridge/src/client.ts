@@ -6,6 +6,12 @@ import { execFile } from 'child_process';
 import { childLogger } from './logger';
 import { clearChromiumLocks, clearChromiumLocksWithRetry } from './clear-locks';
 import { deliverInboundMessage } from './bridge-client';
+import {
+  handleVoiceNote,
+  MessageDedupe,
+  VoiceNoteRateLimit,
+  type VoiceNoteContext,
+} from './voice-note';
 
 // ---------------------------------------------------------------------------
 // WhatsApp-web.js client wrapper.
@@ -127,6 +133,17 @@ export class WhatsAppWebClient extends EventEmitter {
   private browserTeardown: Promise<void> | null = null;
   private reconnectPreparation: Promise<void> | null = null;
 
+  // ─── voice-note plumbing ─────────────────────────────────────────────────
+  // Per-business dedupe + rate-limit. Single bridge replica today, so
+  // process-local state is fine. See voice-note/dedupe.ts and
+  // voice-note/rate-limit.ts for the semantics.
+  private readonly voiceNoteDedupe: MessageDedupe;
+  private readonly voiceNoteRateLimit: VoiceNoteRateLimit;
+  private readonly voiceNotesEnabled: boolean;
+  private readonly groqApiKey: string;
+  private readonly maxVoiceDurationSec: number;
+  private readonly voiceNoteClarification: string;
+
   constructor(options: WhatsAppWebClientOptions) {
     super();
 
@@ -242,12 +259,38 @@ export class WhatsAppWebClient extends EventEmitter {
         ],
       },
 
+      // VN-22 / VN-23: pin WhatsApp Web to a pre-`2.3000.1042401057` build to
+      // work around the upstream `r: r` media-download break. The break
+      // starts at WA Web 2.3000.1042401057 (whatsapp-web.js issue #201828,
+      // PR #201840). We pin to 2.3000.1042056473 (35 days before the break)
+      // — far enough to avoid inheriting any staged compatibility prep, not
+      // so old that WA servers reject the snapshot. Remove this once a
+      // patched whatsapp-web.js release (containing PR #201840) is published.
+      webVersionCache: {
+        type: 'remote',
+        remotePath:
+          'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1042056473-alpha.html',
+      },
+
       // Give the library more time to authenticate before giving up.
       authTimeoutMs: 60_000,
       qrMaxRetries: 5,
     });
 
     this.setupEventHandlers();
+
+    // Voice-note initialization. Each WhatsAppWebClient owns its own
+    // dedupe + rate-limit so per-business limits don't bleed across salons
+    // when the bridge bootstraps multiple sessions. ENABLE_VOICE_NOTES is
+    // checked once and cached — flipping the env var requires a restart.
+    this.voiceNotesEnabled = process.env.ENABLE_VOICE_NOTES === 'true';
+    this.groqApiKey = process.env.GROQ_API_KEY ?? '';
+    this.maxVoiceDurationSec =
+      Number(process.env.MAX_VOICE_DURATION_SEC) || 120;
+    this.voiceNoteDedupe = new MessageDedupe(1000);
+    this.voiceNoteRateLimit = new VoiceNoteRateLimit();
+    this.voiceNoteClarification =
+      "Sorry, I couldn't understand that voice note clearly. Could you type your message or resend?";
 
     log.debug(
       { businessId: this.businessId, sessionDir: this.sessionDir },
@@ -381,9 +424,9 @@ export class WhatsAppWebClient extends EventEmitter {
     });
 
     this.client.on('message', (msg: Message) => {
-      // Fire-and-forget — handleIncomingMessage() handles its own errors,
+      // Fire-and-forget — dispatchInboundMessage() handles its own errors,
       // and we don't want one bad message to break the event loop.
-      this.handleIncomingMessage(msg).catch((e) => {
+      this.dispatchInboundMessage(msg).catch((e) => {
         log.error(
           { businessId: this.businessId, err: (e as Error).message },
           'message handler crashed (continuing)'
@@ -396,48 +439,176 @@ export class WhatsAppWebClient extends EventEmitter {
   // Message handling
   // -------------------------------------------------------------------------
 
-  private async handleIncomingMessage(msg: Message): Promise<void> {
-    // Filter out noise — only process real customer text messages.
+  /**
+   * Top-level dispatcher. Filters out noise (statuses, own messages) and
+   * routes by `msg.type`:
+   *   - 'chat'      → handleTextMessage
+   *   - 'ptt'       → handleVoiceNoteMessage (PTT voice notes)
+   *   - 'audio'     → handleVoiceNoteMessage (shared audio files)
+   *   - anything else (image, document, sticker, ...) → drop silently
+   *
+   * Each handler is responsible for its own retry/dead-letter logic via
+   * `deliverWithRetry`.
+   */
+  private async dispatchInboundMessage(msg: Message): Promise<void> {
     if (msg.fromMe) return;
     if (msg.isStatus) return;
-    if (!msg.body || msg.body.trim().length === 0) return;
+    if (!msg.from) return;
 
-    // Only text messages for now. Voice/image/document get added later.
-    // whatsapp-web.js uses 'chat' as the MessageTypes value for plain text.
-    if (msg.type !== 'chat') return;
+    switch (msg.type) {
+      case 'chat':
+        if (!msg.body || msg.body.trim().length === 0) return;
+        return this.handleTextMessage(msg);
+      case 'ptt':
+      case 'audio':
+        return this.handleVoiceNoteMessage(msg);
+      default:
+        return; // drop silently (image, document, sticker, etc.)
+    }
+  }
 
+  /**
+   * Plain-text customer message. Mirrors the pre-voice-note behavior
+   * exactly — same retry loop, same dead-letter shape, same reply send.
+   */
+  private async handleTextMessage(msg: Message): Promise<void> {
     const log = childLogger('whatsapp-web.client');
 
-    // -------------------------------------------------------------------
-    // Retry the backend call with exponential backoff before giving up.
-    //
-    // Previously any single failure (timeout, 5xx, ECONNRESET) caused
-    // the reply to be silently dropped — the customer would see
-    // nothing on their end and the salon owner had no record of what
-    // happened. That's worse than a stale reply because there's no
-    // signal at all to debug.
-    //
-    // Strategy: 3 attempts with 1s/3s backoff (4th attempt NOT made
-    // because by then the customer has long given up). Per-attempt
-    // timeout is 10s so worst-case total is ~24s instead of 90s.
-    //
-    // On final failure: log a structured `dead-letter` entry with
-    // everything needed to reconstruct the situation — owner can
-    // grep the bridge log for this to see "X replies never reached
-    // the customer today".
-    // -------------------------------------------------------------------
+    const reply = await this.deliverWithRetry({
+      text: msg.body,
+      from: msg.from,
+      messageId: msg.id.id,
+      kind: 'text',
+      deadLetterFields: {
+        textLength: msg.body.length,
+        textPreview: msg.body.slice(0, 80),
+      },
+      log,
+    });
+
+    if (reply) {
+      await this.sendTextMessage(msg.from, reply);
+    }
+
+    // Emit for any external listeners (audit log, analytics, etc).
+    this.emit('incoming-message', {
+      businessId: this.businessId,
+      from: msg.from,
+      text: msg.body,
+      messageId: msg.id.id,
+    });
+  }
+
+  /**
+   * Voice-note (PTT) or shared audio. Two phases:
+   *   1. handleVoiceNote() — download → Groq → validate → return transcript
+   *      (or a skip reason: too short, dedupe, rate-limited, etc.)
+   *   2. If a transcript came back, deliver it through the same retry loop
+   *      used for text. The customer sees a text reply as if they had
+   *      typed it.
+   *
+   * On empty_or_noise or transcribe_failed we send a one-line clarification
+   * so the customer isn't left wondering. All other skip reasons drop
+   * silently with a structured log.
+   */
+  private async handleVoiceNoteMessage(msg: Message): Promise<void> {
+    const log = childLogger('whatsapp-web.client');
+
+    const result = await handleVoiceNote(msg, this.businessId, {
+      voiceNotesEnabled: this.voiceNotesEnabled,
+      clientReady: this.currentStatus === 'ready',
+      dedupe: this.voiceNoteDedupe,
+      rateLimit: this.voiceNoteRateLimit,
+      maxDurationSec: this.maxVoiceDurationSec,
+      groqApiKey: this.groqApiKey,
+    });
+
+    if (result.ok) {
+      const reply = await this.deliverWithRetry({
+        text: result.text,
+        from: msg.from,
+        messageId: msg.id.id,
+        kind: 'voice-note',
+        deadLetterFields: {
+          transcriptLength: result.text.length,
+          transcriptPreview: result.text.slice(0, 80),
+          groqLatencyMs: result.latencyMs,
+          whisperModel: result.model,
+          msgDurationSec: result.durationSec,
+          msgFilesize: result.filesize,
+        },
+        log,
+      });
+      if (reply) {
+        await this.sendTextMessage(msg.from, reply);
+      }
+      // Still emit for audit — owner can see voice notes in inbox.
+      this.emit('incoming-message', {
+        businessId: this.businessId,
+        from: msg.from,
+        text: result.text,
+        messageId: msg.id.id,
+      });
+      return;
+    }
+
+    // Failure / skip path. Most reasons are silent drops; empty_or_noise,
+    // transcribe_failed, and download_failed get a clarification text so
+    // the customer doesn't think the bot is broken. download_failed
+    // specifically tells the user to try again — usually a transient
+    // session-state issue on a freshly-paired client.
+    if (
+      result.reason === 'empty_or_noise' ||
+      result.reason === 'transcribe_failed' ||
+      result.reason === 'download_failed'
+    ) {
+      log.info(
+        {
+          businessId: this.businessId,
+          from: msg.from,
+          messageId: msg.id.id,
+          reason: result.reason,
+          reasonMessage: result.message,
+        },
+        'voice_note_sending_clarification'
+      );
+      try {
+        await this.sendTextMessage(msg.from, this.voiceNoteClarification);
+      } catch (e) {
+        const errDump = (e as { message?: string; toString?: () => string });
+        log.warn(
+          {
+            businessId: this.businessId,
+            err: errDump.message ?? errDump.toString?.() ?? String(e),
+          },
+          'voice_note_clarification_send_failed'
+        );
+      }
+    }
+  }
+
+  /**
+   * Shared retry-with-backoff helper. Used by both text and voice-note
+   * paths to keep delivery semantics identical. Returns the bot's reply
+   * text on success, or null if all retries were exhausted (in which case
+   * the dead-letter has already been logged).
+   *
+   * Per-attempt timeout: 90s (matches the prior text-message behavior;
+   * the backend's LLM call legitimately takes 20-70s on MiniMax-M3).
+   * 3 attempts × 90s + 1s/3s backoff ≈ ~274s worst case.
+   *
+   * The `kind` discriminator lets dead-letter logs distinguish text from
+   * voice-note failures in production log search.
+   */
+  private async deliverWithRetry(args: {
+    text: string;
+    from: string;
+    messageId: string;
+    kind: 'text' | 'voice-note';
+    deadLetterFields: Record<string, unknown>;
+    log: ReturnType<typeof childLogger>;
+  }): Promise<string | null> {
     const MAX_DELIVERY_ATTEMPTS = 3;
-    // Per-attempt timeout. The backend's LLM call legitimately
-    // takes 20-70s on MiniMax-M3 (the model burns ~3.8K reasoning
-    // tokens before producing JSON — see the diagnostic dump in
-    // /lib/llm.ts). The LLM may also take 10-20s on a cold first
-    // call (full prompt assembly + round-trip). 90s gives one good
-    // retry window before we consider the message dead-lettered.
-    // 3 attempts × 90s + 1s/3s backoff = ~274s worst case, which
-    // is well above what we want but it surfaces real stalls — the
-    // open question is whether we should switch to a faster model
-    // rather than ride out this latency (see Step 1 reasoning
-    // investigation).
     const PER_ATTEMPT_TIMEOUT_MS = 90_000;
     const BACKOFF_MS = [1_000, 3_000];
 
@@ -449,9 +620,9 @@ export class WhatsAppWebClient extends EventEmitter {
         const result = await deliverInboundMessage(
           {
             businessId: this.businessId,
-            from: msg.from,
-            text: msg.body,
-            messageId: msg.id.id,
+            from: args.from,
+            text: args.text,
+            messageId: args.messageId,
           },
           { timeoutMs: PER_ATTEMPT_TIMEOUT_MS }
         );
@@ -460,11 +631,12 @@ export class WhatsAppWebClient extends EventEmitter {
         break; // success
       } catch (e) {
         lastError = e as Error;
-        log.warn(
+        args.log.warn(
           {
             businessId: this.businessId,
-            from: msg.from,
-            messageId: msg.id.id,
+            from: args.from,
+            messageId: args.messageId,
+            kind: args.kind,
             attempt,
             maxAttempts: MAX_DELIVERY_ATTEMPTS,
             err: lastError.message,
@@ -478,43 +650,26 @@ export class WhatsAppWebClient extends EventEmitter {
     }
 
     if (lastError) {
-      // ----------------------------------------------------------------
-      // Dead-letter: all retries exhausted. Log the full context so the
-      // salon owner (or support) can reconstruct what happened. The
-      // `dead-letter` tag is grep-friendly.
-      //
-      // Production next-step would be to also write this to a
-      // `delivery_failures` table so it shows up in the inbox /
-      // dashboard. For now, structured log is enough to act on.
-      // ----------------------------------------------------------------
-      log.error(
+      // Dead-letter: all retries exhausted. Structured log so support can
+      // grep for 'dead-letter' and see "X replies never reached the
+      // customer today". `kind` discriminator separates text from voice-note
+      // failures.
+      args.log.error(
         {
           businessId: this.businessId,
-          from: msg.from,
-          messageId: msg.id.id,
-          textLength: msg.body.length,
-          textPreview: msg.body.slice(0, 80),
+          from: args.from,
+          messageId: args.messageId,
+          kind: args.kind,
           attempts: MAX_DELIVERY_ATTEMPTS,
           finalError: lastError.message,
+          ...args.deadLetterFields,
         },
         'dead-letter: deliverInboundMessage failed after all retries'
       );
-      // Don't crash the bridge. Customer sees silence for THIS message
-      // but the next message they send will be processed normally.
-      return;
+      return null;
     }
 
-    if (reply) {
-      await this.sendTextMessage(msg.from, reply);
-    }
-
-    // Emit for any external listeners (audit log, analytics, etc).
-    this.emit('incoming-message', {
-      businessId: this.businessId,
-      from: msg.from,
-      text: msg.body,
-      messageId: msg.id.id,
-    });
+    return reply;
   }
 
   // -------------------------------------------------------------------------
