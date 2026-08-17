@@ -57,6 +57,42 @@ export interface NextAppointment {
 }
 
 /**
+ * Wave 14 — composite shape returned by
+ * `GET /api/business/:id/subscription` (backend/src/routes/dashboard.ts).
+ * Powers the Salon Owner Subscription tab.
+ *
+ * Defensive nullability on every field so trial-only salons (plan_id IS
+ * NULL) round-trip cleanly without paid-plan data.
+ */
+export interface SubscriptionInfo {
+  businessId: string;
+  plan: {
+    id: string;
+    name: string;
+    monthly_price_pkr: number;
+    description: string | null;
+    features: Record<string, boolean>;
+    sort_order: number;
+  } | null;
+  tier: "basic" | "pro" | null;
+  subscription_status: string;
+  trial_status: "active" | "expiring_soon" | "expired" | "converted";
+  trial_started_at: string | null;
+  trial_ends_at: string | null;
+  days_remaining: number | null;
+  is_expired: boolean;
+  next_billing_date: string | null;
+  payment_method: "jazzcash" | "easypaisa" | "bank_transfer" | null;
+  last_payment: {
+    id: string;
+    amount_pkr: number;
+    payment_method: "jazzcash" | "easypaisa" | "bank_transfer";
+    reviewed_at: string;
+    transaction_reference: string | null;
+  } | null;
+}
+
+/**
  * Story 18 — single row from the conversation thread endpoint.
  * `sender_type` matches the `message_sender` Postgres enum:
  *   'customer' | 'agent' | 'owner'
@@ -321,6 +357,61 @@ const MOCK_TIER_LIMITS: TierLimits[] = [
   { tier: "basic", monthlyMessages: 2000, concurrentAgents: 1, pricePKR: 4000 },
   { tier: "pro", monthlyMessages: 10000, concurrentAgents: 3, pricePKR: 12000 },
   { tier: "business", monthlyMessages: 50000, concurrentAgents: 10, pricePKR: 24000 },
+];
+
+// Wave 13 — plans + pending payment mocks for the dashboard preview.
+const MOCK_PLANS = [
+  {
+    id: "basic",
+    name: "Basic",
+    monthly_price_pkr: 3000,
+    description: "For solo stylists just getting started",
+    features: {
+      whatsapp_ai: true,
+      voice_notes: false,
+      escalations: true,
+      multi_staff: false,
+    },
+    sort_order: 1,
+  },
+  {
+    id: "pro",
+    name: "Pro",
+    monthly_price_pkr: 6000,
+    description: "For growing salons with multiple staff",
+    features: {
+      whatsapp_ai: true,
+      voice_notes: true,
+      escalations: true,
+      multi_staff: true,
+      analytics: true,
+    },
+    sort_order: 2,
+  },
+];
+
+const MOCK_PENDING_PAYMENTS = [
+  {
+    id: "mock-payment-001",
+    business_id: null,
+    plan_id: "pro",
+    amount_pkr: 6000,
+    payment_method: "jazzcash" as const,
+    customer_name: "Ayesha Khan",
+    customer_email: "ayesha@example.com",
+    customer_phone: "923001234567",
+    customer_whatsapp: "923001234567",
+    transaction_reference: "TX-998877",
+    screenshot_url: "mock-payment-001/screenshot.png",
+    status: "pending" as const,
+    rejection_reason: null,
+    reviewed_by: null,
+    reviewed_at: null,
+    review_notes: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 7 * 86400_000).toISOString(),
+  },
 ];
 
 const MOCK_SAFETY: SafetyRules = {
@@ -1024,6 +1115,155 @@ export const api = {
       () => ({ id: holidayId }),
       { method: "DELETE" },
     ),
+
+  // ---- Wave 13: payment subscriptions ----
+
+  /** List active plans (public). */
+  getPlans: (): Promise<{
+    plans: Array<{
+      id: string;
+      name: string;
+      monthly_price_pkr: number;
+      description: string | null;
+      features: Record<string, unknown>;
+      sort_order: number;
+    }>;
+  }> => withMock("/api/plans", () => ({ plans: MOCK_PLANS })),
+
+  /**
+   * Wave 14 — Salon Owner Subscription tab composite read.
+   * Returns plan + billing + features + last payment reference for the
+   * current salon. See SubscriptionInfo for the full shape.
+   *
+   * Direct backend call (no withMock fallback) — the Salon Owner needs
+   * trustworthy billing state, so this is real-only. The TenantSubscription
+   * component handles the error card with a Try again button if the request
+   * fails (offline, 401, 403, 500, etc.).
+   *
+   * Dev preview of paid-state UI when no real data exists:
+   *   - apply the activation SQL in supabase on a salon's row (set
+   *     subscription_status='active', plan_id='pro'),
+   *     OR
+   *   - approve a payment request via /superadmin/payments.
+   */
+  mySubscription: (businessId: string) =>
+    request<SubscriptionInfo>(`/api/business/${businessId}/subscription`),
+
+  /** Submit a payment request (with optional screenshot). */
+  submitPaymentRequest: (input: {
+    planId: string;
+    paymentMethod: "jazzcash" | "easypaisa" | "bank_transfer";
+    customerName: string;
+    customerEmail: string;
+    customerPhone: string;
+    customerWhatsapp?: string | null;
+    transactionReference?: string | null;
+    screenshotBase64?: string | null;
+    screenshotMimeType?: string | null;
+    screenshotFilename?: string | null;
+    businessId?: string | null;
+  }) =>
+    withMock<{
+      requestId: string;
+      planId: string;
+      amountPkr: number;
+      expectedReviewHours: number;
+    }>(
+      "/api/payments",
+      () => ({
+        requestId: crypto.randomUUID(),
+        planId: input.planId,
+        amountPkr:
+          MOCK_PLANS.find((p) => p.id === input.planId)?.monthly_price_pkr ?? 0,
+        expectedReviewHours: 24,
+      }),
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+
+  /** Check status of a payment request (customer-facing). */
+  getPaymentRequest: (id: string, email: string) =>
+    withMock<{
+      id: string;
+      plan_id: string;
+      amount_pkr: number;
+      status: "pending" | "approved" | "rejected" | "expired";
+      rejection_reason: string | null;
+      created_at: string;
+      reviewed_at: string | null;
+    }>(
+      `/api/payments/${id}?email=${encodeURIComponent(email)}`,
+      () => ({
+        id,
+        plan_id: "pro",
+        amount_pkr: 6000,
+        status: "pending" as const,
+        rejection_reason: null,
+        created_at: new Date().toISOString(),
+        reviewed_at: null,
+      }),
+    ),
+
+  /** Superadmin: list payment requests (filter by status). */
+  listPendingPayments: (status?: "pending" | "approved" | "rejected" | "expired") =>
+    withMock<{
+      payments: Array<{
+        id: string;
+        business_id: string | null;
+        plan_id: string;
+        amount_pkr: number;
+        payment_method: "jazzcash" | "easypaisa" | "bank_transfer";
+        customer_name: string;
+        customer_email: string;
+        customer_phone: string;
+        customer_whatsapp: string | null;
+        transaction_reference: string | null;
+        screenshot_url: string | null;
+        status: "pending" | "approved" | "rejected" | "expired";
+        rejection_reason: string | null;
+        reviewed_by: string | null;
+        reviewed_at: string | null;
+        review_notes: string | null;
+        created_at: string;
+        updated_at: string;
+        expires_at: string;
+      }>;
+    }>(
+      `/api/superadmin/payments${status ? `?status=${status}` : ""}`,
+      () => ({ payments: MOCK_PENDING_PAYMENTS }),
+    ),
+
+  /** Superadmin: approve a payment request. */
+  approvePayment: (id: string, reviewNotes?: string) =>
+    withMock<{ ok: true; subscriptionStatus: string; nextBillingDate: string }>(
+      `/api/superadmin/payments/${id}/approve`,
+      () => ({
+        ok: true as const,
+        subscriptionStatus: "active",
+        nextBillingDate: new Date(Date.now() + 30 * 86400_000).toISOString(),
+      }),
+      {
+        method: "POST",
+        body: JSON.stringify({ reviewNotes }),
+      },
+    ),
+
+  /** Superadmin: reject a payment request. */
+  rejectPayment: (id: string, reason: string, reviewNotes?: string) =>
+    withMock<{ ok: true }>(
+      `/api/superadmin/payments/${id}/reject`,
+      () => ({ ok: true }),
+      {
+        method: "POST",
+        body: JSON.stringify({ reason, reviewNotes }),
+      },
+    ),
+
+  /** Superadmin: get a short-lived signed URL for the screenshot. */
+  getPaymentScreenshotUrl: (id: string) =>
+    withMock<{ url: string; expiresInSec: number }>(
+      `/api/superadmin/payments/${id}/screenshot-url`,
+      () => ({ url: "", expiresInSec: 600 }),
+    ),
 };
 
 export const qk = {
@@ -1045,6 +1285,9 @@ export const qk = {
     ["agent-active", id] as const,
   myTrialStatus: (id: string) =>
     ["trial-status", id] as const,
+  // Wave 14 — composite salon-owner subscription read.
+  mySubscription: (id: string) =>
+    ["subscription", id] as const,
   services: (id: string) => ["services", id] as const,
   dashboardStats: (id: string) => ["dashboard-stats", id] as const,
   escalations: (id: string) => ["escalations", id] as const,
@@ -1054,4 +1297,9 @@ export const qk = {
   businessToday: (id: string) => ["bookings", "today", id] as const,
   businessBookings: (id: string, date: string) =>
     ["bookings", "date", id, date] as const,
+  // Wave 13
+  plans: ["plans"] as const,
+  pendingPayments: (status?: string) =>
+    ["payments", "pending", status ?? "all"] as const,
+  paymentDetail: (id: string) => ["payments", id] as const,
 };

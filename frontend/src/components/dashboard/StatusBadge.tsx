@@ -47,3 +47,30 @@ export function PaymentStatusBadge({ status }: { status: "paid" | "pending" | "f
     </Badge>
   );
 }
+
+// Wave 13 — payment_request status (the manual approval flow).
+// Distinct from the legacy PaymentStatusBadge above which is for the
+// superadmin payment log only.
+export function PaymentRequestStatusBadge({
+  status,
+}: {
+  status: "pending" | "approved" | "rejected" | "expired";
+}) {
+  const styles = {
+    pending: "bg-warning-soft text-[oklch(0.35_0.1_70)] border-transparent",
+    approved: "bg-success-soft text-[oklch(0.42_0.10_195)] border-transparent",
+    rejected: "bg-danger-soft text-[oklch(0.4_0.18_27)] border-transparent",
+    expired: "bg-muted text-muted-foreground border-transparent",
+  } as const;
+  const labels = {
+    pending: "Pending",
+    approved: "Approved",
+    rejected: "Rejected",
+    expired: "Expired",
+  } as const;
+  return (
+    <Badge className={cn("font-medium capitalize", styles[status])}>
+      {labels[status]}
+    </Badge>
+  );
+}
