@@ -20,6 +20,7 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
+import { FieldError } from "@/components/ui/field-error";
 import {
   Select,
   SelectContent,
@@ -28,6 +29,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import {
+  validateEmail,
+  validatePhone,
+} from "@/lib/formValidators";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 
@@ -107,7 +112,8 @@ function emptyService(): ServiceDraft {
   };
 }
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// EMAIL_RE + validatePhone live in `@/lib/formValidators` so the payment
+// form and onboarding wizard share identical rules.
 
 // ---- Component --------------------------------------------------------------
 
@@ -142,16 +148,26 @@ function OnboardingPage() {
   const normalizeWhatsApp = (raw: string): string =>
     raw.replace(/[\s\-()+]/g, "").replace(/^0+/, "");
 
+  // Per-field error messages for the Salon Profile step. Empty string
+  // values mean "not yet validated" — see NEXT() below for the trigger.
+  // We render them inline below each input (Wave 16) so the "Continue"
+  // button doesn't have to be silently disabled. The user always sees
+  // exactly which field is wrong and what to fix.
+  const [s1Errors, setS1Errors] = useState<{
+    salonName?: string | null;
+    salonType?: string | null;
+    city?: string | null;
+    email?: string | null;
+    whatsapp?: string | null;
+  }>({});
+
   const step1Valid = useMemo(
     () =>
       salonName.trim().length >= 2 &&
       salonType !== "" &&
       city !== "" &&
-      EMAIL_RE.test(ownerEmail.trim()) &&
-      (() => {
-        const digits = normalizeWhatsApp(whatsappNumber);
-        return digits.length >= 10 && digits.length <= 15 && /^\d+$/.test(digits);
-      })(),
+      !validateEmail(ownerEmail) &&
+      !validatePhone(whatsappNumber),
     [salonName, salonType, city, ownerEmail, whatsappNumber],
   );
 
@@ -218,10 +234,31 @@ function OnboardingPage() {
 
   // ---- Navigation ----------------------------------------------------------
 
+  // Run all the per-field validators for step 1 and populate s1Errors.
+  // Returns true when the step is fully valid. Each missing field gets
+  // its own bespoke error message — much clearer than the old
+  // "Please complete every field" toast that left the user to guess.
+  function validateStep1(): boolean {
+    const nextErrors = {
+      salonName:
+        salonName.trim().length < 2
+          ? "Salon name must be at least 2 characters"
+          : null,
+      salonType: salonType === "" ? "Pick a salon type" : null,
+      city: city === "" ? "Pick a city" : null,
+      email: validateEmail(ownerEmail),
+      whatsapp: validatePhone(whatsappNumber),
+    };
+    setS1Errors(nextErrors);
+    return Object.values(nextErrors).every((v) => v == null);
+  }
+
   function next() {
-    if (step === 0 && !step1Valid) {
-      toast.error("Please complete every field on the salon profile.");
-      return;
+    if (step === 0) {
+      if (!validateStep1()) {
+        toast.error("Please fix the highlighted fields below.");
+        return;
+      }
     }
     if (step === 1 && !step2Valid) {
       toast.error(
@@ -338,13 +375,19 @@ function OnboardingPage() {
                     value={salonName}
                     onChange={(e) => setSalonName(e.target.value)}
                     autoComplete="organization"
+                    aria-invalid={!!s1Errors.salonName}
                   />
+                  <FieldError error={s1Errors.salonName} />
                 </div>
 
                 <div>
                   <Label htmlFor="city">City</Label>
                   <Select value={city} onValueChange={setCity}>
-                    <SelectTrigger id="city" className="mt-1.5 h-11">
+                    <SelectTrigger
+                      id="city"
+                      className="mt-1.5 h-11"
+                      aria-invalid={!!s1Errors.city}
+                    >
                       <SelectValue placeholder="Select city" />
                     </SelectTrigger>
                     <SelectContent>
@@ -355,6 +398,7 @@ function OnboardingPage() {
                       ))}
                     </SelectContent>
                   </Select>
+                  <FieldError error={s1Errors.city} />
                 </div>
 
                 <div>
@@ -369,8 +413,10 @@ function OnboardingPage() {
                       className="pl-10 h-11"
                       value={ownerEmail}
                       onChange={(e) => setOwnerEmail(e.target.value)}
+                      aria-invalid={!!s1Errors.email}
                     />
                   </div>
+                  <FieldError error={s1Errors.email} />
                 </div>
 
                 <div className="md:col-span-2">
@@ -386,8 +432,10 @@ function OnboardingPage() {
                       className="pl-10 h-11"
                       value={whatsappNumber}
                       onChange={(e) => setWhatsappNumber(e.target.value)}
+                      aria-invalid={!!s1Errors.whatsapp}
                     />
                   </div>
+                  <FieldError error={s1Errors.whatsapp} />
                   <p className="mt-1 text-xs text-muted-foreground">
                     The WhatsApp line customers will message. Pair it in the
                     next step.
@@ -659,7 +707,10 @@ function OnboardingPage() {
               <Button
                 type="button"
                 onClick={next}
-                disabled={(step === 0 && !step1Valid) || (step === 1 && !step2Valid)}
+                // Always enabled — `next()` runs the per-field validators
+                // and populates inline red helper text + a toast if anything
+                // is wrong. The old silent-disabled pattern left users
+                // guessing why the button refused to work.
                 className="h-11 rounded-full bg-gradient-luxe px-6 text-white shadow-luxe hover:opacity-95"
               >
                 Continue <ArrowRight className="size-4" />
