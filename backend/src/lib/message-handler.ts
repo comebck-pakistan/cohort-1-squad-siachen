@@ -9,6 +9,7 @@ import {
   recordEscalation,
   saveMessage,
   isAgentActive,
+  isSubscriptionActive,
   updateCustomerNameIfMissing,
   isLidFormat,
   markConversationNeedsReviewLid,
@@ -310,6 +311,52 @@ async function handleIncomingMessageInner(
       reply: fixedReply,
       conversationId: expConversationId,
       customerId: expCustomerId,
+      appointment: 'not_attempted',
+    };
+  }
+
+  // Wave 13 — subscription gate. If subscription_status='expired' or
+  // 'cancelled', behave like the trial-expired branch: persist the
+  // customer turn so the owner sees it in the inbox, then send a fixed
+  // fallback that points the customer at the salon directly. The fall
+  // back is identical to the trial-expired case because the customer
+  // experience is the same — bot is "off" because the subscription lapsed.
+  let subscriptionExpired = false;
+  try {
+    subscriptionExpired = !(await isSubscriptionActive(businessId));
+  } catch (e) {
+    requestLog.warn(
+      { err: (e as Error).message },
+      'subscription_status lookup failed — fail-open, treating as active',
+    );
+    subscriptionExpired = false;
+  }
+  if (subscriptionExpired) {
+    let subCustomerId: string | null = null;
+    let subConversationId: string | null = null;
+    try {
+      subCustomerId = await getOrCreateCustomer(customerPhone);
+      subConversationId = await getOrCreateConversation(businessId, subCustomerId);
+      await saveMessage(subConversationId, 'customer', text);
+      await touchConversation(subConversationId);
+      requestLog.info(
+        { conversationId: subConversationId },
+        'subscription_expired_sending_fallback',
+      );
+    } catch (e) {
+      requestLog.warn(
+        { err: (e as Error).message },
+        'subscription-expired message persistence failed (non-fatal)',
+      );
+    }
+
+    const fixedReply =
+      "This salon's Recepta subscription is currently inactive. Please contact the salon directly to book an appointment, or message again after they renew.";
+
+    return {
+      reply: fixedReply,
+      conversationId: subConversationId,
+      customerId: subCustomerId,
       appointment: 'not_attempted',
     };
   }

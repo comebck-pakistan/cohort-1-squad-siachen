@@ -491,6 +491,29 @@ export async function isAgentActive(businessId: string): Promise<boolean> {
 }
 
 /**
+ * Wave 13 — subscription gate. Returns true when the business is allowed
+ * to receive AI replies (status in 'active' or 'trial'). Returns false
+ * when subscription_status='expired' or 'cancelled'.
+ *
+ * Fail-open: on DB error or missing row, returns true so a transient
+ * Supabase hiccup doesn't lock every salon out.
+ */
+export async function isSubscriptionActive(businessId: string): Promise<boolean> {
+  const { data, error } = await getSupabase()
+    .from('businesses')
+    .select('subscription_status')
+    .eq('id', businessId)
+    .maybeSingle();
+
+  if (error) {
+    console.warn(`[db.ts] isSubscriptionActive lookup failed: ${error.message}`);
+    return true; // fail-open
+  }
+  if (!data) return true; // missing row → assume active
+  return data.subscription_status !== 'expired' && data.subscription_status !== 'cancelled';
+}
+
+/**
  * Find an existing customer by phone, or create one.
  *
  * Race-safe: uses upsert so two concurrent requests for the same

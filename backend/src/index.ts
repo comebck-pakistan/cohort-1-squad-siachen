@@ -19,8 +19,11 @@ import onboardingRouter from './routes/onboarding';
 import bridgeRouter from './routes/bridge';
 import freeTrialSignupRouter from './routes/free-trial-signup';
 import waitlistRouter from './routes/waitlist';
+import paymentsRouter from './routes/payments';
+import superadminPaymentsRouter from './routes/superadmin-payments';
 import { logger, childLogger } from './lib/logger';
 import { startTrialExpiryJob } from './jobs/trial-expiry';
+import { startSubscriptionExpiryJob } from './jobs/subscription-expiry';
 import { stopAllJobs } from './lib/scheduler';
 
 // ---------------------------------------------------------------------------
@@ -134,6 +137,10 @@ app.use('/api', bridgeRouter);
 app.use('/api', freeTrialSignupRouter);
 // Wave 8 — landing-page waitlist capture. Public POST endpoint, no auth.
 app.use('/api', waitlistRouter);
+// Wave 13 — payment subscriptions. Public plans + payment submissions;
+// superadmin reviews under /api/superadmin/payments.
+app.use('/api', paymentsRouter);
+app.use('/api', superadminPaymentsRouter);
 // Onboarding proxy — /onboarding/:id/* is forwarded to the bridge service
 // (Phase 1). Mounted at root because the path is part of the URL space shared
 // with the bridge's own QR server.
@@ -176,6 +183,9 @@ const server = app.listen(PORT, () => {
   // The job lives in lib/jobs/trial-expiry.ts; see lib/scheduler.ts for
   // the small registry that ticks it.
   startTrialExpiryJob();
+  // Wave 13 — subscription-expiry job. Hourly: lock agents whose
+  // subscription_status='active' and next_billing_date has passed.
+  startSubscriptionExpiryJob();
 });
 
 // ---------------------------------------------------------------------------
