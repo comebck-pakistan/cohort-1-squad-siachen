@@ -100,7 +100,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { name: "twitter:card", content: "summary_large_image" },
       { name: "twitter:site", content: "@Recepta" },
       { property: "og:image", content: "/og-image.png" },
-      { property: "og:url", content: "https://recepta.pk/" },
+      { property: "og:url", content: "https://receptaagent.tech/" },
       { name: "twitter:image", content: "/og-image.png" },
     ],
     links: [
