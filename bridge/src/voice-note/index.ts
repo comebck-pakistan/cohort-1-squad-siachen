@@ -5,6 +5,7 @@ export {
   type VoiceNoteContext,
   type VoiceNoteResult,
   type VoiceNoteSkipReason,
+  type MediaDownloader,
 } from './handler';
 
 export { isValidTranscript } from './validate';

@@ -66,6 +66,24 @@ export interface BridgeInboundMessage {
   from: string;
   text: string;
   messageId: string;
+  /**
+   * Optional image-media payload (Wave 18). When the customer sends an
+   image over WhatsApp, the bridge downloads the bytes via
+   `msg.downloadMedia()` (which returns base64 + mime type) and forwards
+   them inline. No multipart, no separate endpoint — keeps the
+   service-to-service contract identical to text.
+
+   The base64 string MAY include the `data:` URI prefix or may be raw
+   base64 — both are accepted by the backend. For very large images we
+   could move this to multipart, but the existing 90s per-attempt
+   timeout covers payloads up to ~5MB without trouble.
+   */
+  media?: {
+    kind: 'image';
+    base64: string;
+    mimeType: string;
+    filesize?: number;
+  };
 }
 
 /**
