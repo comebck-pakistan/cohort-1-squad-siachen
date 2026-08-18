@@ -69,7 +69,6 @@ function LandingPage() {
       <HowItWorks />
       <Pricing />
       <Faq />
-      <Footer />
     </div>
   );
 }
@@ -202,7 +201,7 @@ function Hero() {
                 <Button
                   asChild
                   size="lg"
-                  className="h-12 rounded-full bg-gradient-luxe px-7 text-base text-white shadow-luxe hover:opacity-95"
+                  className="hero-cta h-12 rounded-full bg-gradient-luxe px-7 text-base text-white shadow-luxe hover:opacity-95"
                 >
                   <Link to="/waitlist">
                     Join the waitlist
@@ -1483,31 +1482,7 @@ function AccordionRow({
 }
 
 // ---------------------------------------------------------------------------
-// Footer
+// Footer — Wave 17: now mounted globally in __root.tsx. The previous
+// inline landing-page footer was removed and replaced with the shared
+// <Footer /> component, which appears on every public route.
 // ---------------------------------------------------------------------------
-
-function Footer() {
-  return (
-    <FadeIn>
-      <footer className="relative">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-6 py-8">
-          <div className="flex items-center gap-2">
-            <div className="grid size-8 place-items-center rounded-lg bg-gradient-luxe text-white">
-              <Sparkles className="size-4" />
-            </div>
-            <span className="font-display text-base font-semibold">Recepta</span>
-            <span className="text-xs text-muted-foreground">© {new Date().getFullYear()} · Made in Pakistan</span>
-          </div>
-          <div className="flex items-center gap-6 text-xs text-muted-foreground">
-            <a href="#features">Features</a>
-            <a href="#how-it-works">How it works</a>
-            <a href="#pricing">Pricing</a>
-            <a href="#faq">FAQ</a>
-            <Link to="/login">Log in</Link>
-            <Link to="/superadmin/login">Admin</Link>
-          </div>
-        </div>
-      </footer>
-    </FadeIn>
-  );
-}
