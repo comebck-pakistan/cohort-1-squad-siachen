@@ -107,10 +107,17 @@ router.post('/webhook', async (req: Request, res: Response) => {
     // lookup, conversation_state update, LLM call, agent reply persistence.
     // Failures inside the handler are isolated (it logs + still tries
     // to produce a reply) — we just send whatever reply it returns.
+    //
+    // Note (Wave 18): Meta Cloud API's image messages are still dropped
+    // at extractMessageFromWebhook today (it only returns text-type
+    // messages). Wiring Meta Cloud images is a follow-up — for now
+    // only WhatsApp-Web customers get this path. messageId is passed
+    // through so image_analysis_logs rows can be cross-referenced.
     const result = await handleIncomingMessage({
       businessId,
       from,
       text,
+      messageId: parsed.messageId,
     });
 
     // Step 5 — send the reply via Meta's API.

@@ -2380,3 +2380,80 @@ export async function recordEscalation(
     console.warn('[db.ts] recordEscalation failed:', error.message);
   }
 }
+
+// ---------------------------------------------------------------------------
+// recordImageAnalysis — Wave 18 (image analysis).
+//
+// Persists every image-classification result to image_analysis_logs so we
+// have a real audit trail of what customers actually send over time. The
+// concern_or_complaint bucket is the highest-stakes category — having
+// every classification row queryable means we can later audit "did we
+// escalate when we should have?" without going back to WhatsApp transcripts.
+//
+// Failure is non-fatal — logging only. Never throws so a transient DB
+// hiccup doesn't kill the customer's reply path.
+//
+// The shape of `ImageAnalysis` is defined in ./image-analysis.ts so this
+// helper stays free of LLM concerns.
+// ---------------------------------------------------------------------------
+
+export interface RecordImageAnalysisInput {
+  businessId: string;
+  conversationId: string | null;
+  customerId: string | null;
+  /** WhatsApp message id (text) — useful for cross-referencing the
+   *  `messages` row that's written separately. Optional because the
+   *  message-handler may not always have it (e.g. the demo widget). */
+  messageId?: string | null;
+  classification: 'service_reference' | 'concern_or_complaint' | 'unrelated_or_unclear';
+  imageDescription: string;
+  intentNotes: string;
+  confidence: 'high' | 'medium' | 'low';
+  escalateToHuman: boolean;
+  safetyNetTriggered: boolean;
+  draftReply: string;
+  llmProvider: string;
+  llmModel: string;
+  latencyMs: number;
+  /** Free-form additional context (mime type, file size, caption
+   *  length, etc.). Lands in the metadata JSONB column for ad-hoc
+   *  querying without us having to add a column per field. */
+  metadata?: Record<string, unknown>;
+}
+
+export async function recordImageAnalysis(
+  input: RecordImageAnalysisInput
+): Promise<void> {
+  try {
+    const { error } = await getSupabase()
+      .from('image_analysis_logs')
+      .insert({
+        business_id: input.businessId,
+        conversation_id: input.conversationId,
+        customer_id: input.customerId,
+        message_id: input.messageId ?? null,
+        classification: input.classification,
+        image_description: input.imageDescription,
+        intent_notes: input.intentNotes,
+        confidence: input.confidence,
+        escalate_to_human: input.escalateToHuman,
+        safety_net_triggered: input.safetyNetTriggered,
+        draft_reply: input.draftReply,
+        llm_provider: input.llmProvider,
+        llm_model: input.llmModel,
+        latency_ms: input.latencyMs,
+        metadata: input.metadata ?? {},
+      });
+    if (error) {
+      console.warn(
+        '[db.ts] recordImageAnalysis failed:',
+        error.message
+      );
+    }
+  } catch (e) {
+    console.warn(
+      '[db.ts] recordImageAnalysis crashed (non-fatal):',
+      (e as Error).message
+    );
+  }
+}
