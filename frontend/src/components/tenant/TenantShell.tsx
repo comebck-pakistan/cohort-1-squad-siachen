@@ -10,8 +10,7 @@ import {
   MessagesSquare,
   CalendarDays,
   Scissors,
-  Users,
-  Megaphone,
+  CreditCard,
   Bot,
   Building2,
   ChevronDown,
@@ -48,6 +47,7 @@ const nav: NavItem[] = [
   { to: "/salon-portal/inbox", label: "Escalations", icon: MessagesSquare },
   { to: "/salon-portal/business", label: "Services & Staff", icon: Scissors },
   { to: "/salon-portal/ai-rules", label: "Agent Rules", icon: Bot },
+  { to: "/salon-portal/subscription", label: "Subscription", icon: CreditCard },
   { to: "/salon-portal/onboarding", label: "Connect WhatsApp", icon: Smartphone },
 ];
 
@@ -284,14 +284,6 @@ export function TenantShell() {
             );
           })}
         </nav>
-
-        {/* Coming-soon quick links (visual parity with reference) */}
-        <div className="px-3 pb-3">
-          <div className="rounded-lg border border-dashed p-3 text-[11px] text-muted-foreground space-y-1.5">
-            <div className="flex items-center gap-2 opacity-80"><Users className="size-3.5" /> Staff availability · coming soon</div>
-            <div className="flex items-center gap-2 opacity-80"><Megaphone className="size-3.5" /> Promotions · coming soon</div>
-          </div>
-        </div>
 
         {/* Wave 7 — subscription state panel. Shows paid / trial-active /
             expiring-soon / expired. Replaces the old full-width UpgradeBanner. */}

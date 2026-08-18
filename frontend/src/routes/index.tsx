@@ -69,7 +69,6 @@ function LandingPage() {
       <HowItWorks />
       <Pricing />
       <Faq />
-      <Footer />
     </div>
   );
 }
@@ -202,7 +201,7 @@ function Hero() {
                 <Button
                   asChild
                   size="lg"
-                  className="h-12 rounded-full bg-gradient-luxe px-7 text-base text-white shadow-luxe hover:opacity-95"
+                  className="hero-cta h-12 rounded-full bg-gradient-luxe px-7 text-base text-white shadow-luxe hover:opacity-95"
                 >
                   <Link to="/waitlist">
                     Join the waitlist
@@ -1169,37 +1168,38 @@ function Pricing() {
     {
       name: "Basic",
       tagline: "Single-salon owners",
-      priceMonthly: 5000,
-      priceLabel: "5,000",
+      priceMonthly: 3000,
+      priceLabel: "3,000",
       suffix: "PKR / month",
       features: [
         "Everything in Free — no trial expiry",
         "Unlimited bookings",
         "Edit services, hours, and holidays",
         "Take over any conversation manually",
-        "Custom agent name & tone",
         "Single salon / branch",
       ],
-      // CTAs reflect current product state — payment isn't self-serve yet.
-      cta: "Get Early Access",
-      ctaTo: "/waitlist",
+      // Wave 13 — paid plans now self-serve via /payment?plan=basic
+      cta: "Get Basic",
+      ctaTo: "/payment",
+      planId: "basic",
       popular: true,
     },
     {
-      name: "Premium",
+      name: "Pro",
       tagline: "Multi-staff & busy salons",
-      priceMonthly: 12000,
-      priceLabel: "12,000",
+      priceMonthly: 6000,
+      priceLabel: "6,000",
       suffix: "PKR / month",
       features: [
         "Everything in Basic",
+        "Voice notes (transcribed automatically)",
         "Multi-staff support",
         "Custom AI rules & persona",
         "Priority onboarding",
-        "Multi-location — coming soon",
       ],
-      cta: "Request Early Access",
-      ctaTo: "/waitlist",
+      cta: "Get Pro",
+      ctaTo: "/payment",
+      planId: "pro",
       popular: false,
     },
   ];
@@ -1250,7 +1250,8 @@ interface Tier {
   suffix: string;
   features: string[];
   cta: string;
-  ctaTo: "/onboarding" | "/waitlist";
+  ctaTo: "/onboarding" | "/waitlist" | "/payment";
+  planId?: string;  // Wave 13 — when ctaTo is /payment, this becomes ?plan=
   popular: boolean;
 }
 
@@ -1317,7 +1318,11 @@ function PricingCard({ tier }: { tier: Tier }) {
             : "bg-foreground text-background hover:bg-foreground/90",
         )}
       >
-        <Link to={tier.ctaTo} className="group">
+        <Link
+          to={tier.ctaTo}
+          search={tier.planId ? { plan: tier.planId } : undefined}
+          className="group"
+        >
           {tier.cta}
           <ArrowRight className="size-4 transition-transform duration-300 group-hover:translate-x-1" />
         </Link>
@@ -1477,31 +1482,7 @@ function AccordionRow({
 }
 
 // ---------------------------------------------------------------------------
-// Footer
+// Footer — Wave 17: now mounted globally in __root.tsx. The previous
+// inline landing-page footer was removed and replaced with the shared
+// <Footer /> component, which appears on every public route.
 // ---------------------------------------------------------------------------
-
-function Footer() {
-  return (
-    <FadeIn>
-      <footer className="relative">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-6 py-8">
-          <div className="flex items-center gap-2">
-            <div className="grid size-8 place-items-center rounded-lg bg-gradient-luxe text-white">
-              <Sparkles className="size-4" />
-            </div>
-            <span className="font-display text-base font-semibold">Recepta</span>
-            <span className="text-xs text-muted-foreground">© {new Date().getFullYear()} · Made in Pakistan</span>
-          </div>
-          <div className="flex items-center gap-6 text-xs text-muted-foreground">
-            <a href="#features">Features</a>
-            <a href="#how-it-works">How it works</a>
-            <a href="#pricing">Pricing</a>
-            <a href="#faq">FAQ</a>
-            <Link to="/login">Log in</Link>
-            <Link to="/superadmin/login">Admin</Link>
-          </div>
-        </div>
-      </footer>
-    </FadeIn>
-  );
-}

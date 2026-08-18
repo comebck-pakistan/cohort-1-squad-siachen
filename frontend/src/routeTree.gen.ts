@@ -13,9 +13,13 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as OnboardingRouteImport } from './routes/onboarding'
+import { Route as PaymentRouteImport } from './routes/payment'
+import { Route as PaymentSuccessRouteImport } from './routes/payment-success'
+import { Route as PrivacyRouteImport } from './routes/privacy'
 import { Route as SalonPortalRouteImport } from './routes/salon-portal'
 import { Route as SitemapDotxmlRouteImport } from './routes/sitemap[.]xml'
 import { Route as SuperadminRouteImport } from './routes/superadmin'
+import { Route as TermsRouteImport } from './routes/terms'
 import { Route as WaitlistRouteImport } from './routes/waitlist'
 import { Route as SalonPortalIndexRouteImport } from './routes/salon-portal.index'
 import { Route as SalonPortalAiRulesRouteImport } from './routes/salon-portal.ai-rules'
@@ -23,8 +27,10 @@ import { Route as SalonPortalBookingsRouteImport } from './routes/salon-portal.b
 import { Route as SalonPortalBusinessRouteImport } from './routes/salon-portal.business'
 import { Route as SalonPortalInboxRouteImport } from './routes/salon-portal.inbox'
 import { Route as SalonPortalOnboardingRouteImport } from './routes/salon-portal.onboarding'
+import { Route as SalonPortalSubscriptionRouteImport } from './routes/salon-portal.subscription'
 import { Route as SuperadminIndexRouteImport } from './routes/superadmin.index'
 import { Route as SuperadminLoginRouteImport } from './routes/superadmin.login'
+import { Route as SuperadminPaymentsRouteImport } from './routes/superadmin.payments'
 import { Route as SuperadminSalonsRouteImport } from './routes/superadmin.salons'
 import { Route as SuperadminSettingsRouteImport } from './routes/superadmin.settings'
 import { Route as SuperadminSubscriptionsRouteImport } from './routes/superadmin.subscriptions'
@@ -49,6 +55,21 @@ const OnboardingRoute = OnboardingRouteImport.update({
   path: '/onboarding',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PaymentRoute = PaymentRouteImport.update({
+  id: '/payment',
+  path: '/payment',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PaymentSuccessRoute = PaymentSuccessRouteImport.update({
+  id: '/payment-success',
+  path: '/payment-success',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PrivacyRoute = PrivacyRouteImport.update({
+  id: '/privacy',
+  path: '/privacy',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SalonPortalRoute = SalonPortalRouteImport.update({
   id: '/salon-portal',
   path: '/salon-portal',
@@ -62,6 +83,11 @@ const SitemapDotxmlRoute = SitemapDotxmlRouteImport.update({
 const SuperadminRoute = SuperadminRouteImport.update({
   id: '/superadmin',
   path: '/superadmin',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const TermsRoute = TermsRouteImport.update({
+  id: '/terms',
+  path: '/terms',
   getParentRoute: () => rootRouteImport,
 } as any)
 const WaitlistRoute = WaitlistRouteImport.update({
@@ -99,6 +125,11 @@ const SalonPortalOnboardingRoute = SalonPortalOnboardingRouteImport.update({
   path: '/onboarding',
   getParentRoute: () => SalonPortalRoute,
 } as any)
+const SalonPortalSubscriptionRoute = SalonPortalSubscriptionRouteImport.update({
+  id: '/subscription',
+  path: '/subscription',
+  getParentRoute: () => SalonPortalRoute,
+} as any)
 const SuperadminIndexRoute = SuperadminIndexRouteImport.update({
   id: '/',
   path: '/',
@@ -107,6 +138,11 @@ const SuperadminIndexRoute = SuperadminIndexRouteImport.update({
 const SuperadminLoginRoute = SuperadminLoginRouteImport.update({
   id: '/login',
   path: '/login',
+  getParentRoute: () => SuperadminRoute,
+} as any)
+const SuperadminPaymentsRoute = SuperadminPaymentsRouteImport.update({
+  id: '/payments',
+  path: '/payments',
   getParentRoute: () => SuperadminRoute,
 } as any)
 const SuperadminSalonsRoute = SuperadminSalonsRouteImport.update({
@@ -130,16 +166,22 @@ export interface FileRoutesByFullPath {
   '/dashboard': typeof DashboardRoute
   '/login': typeof LoginRoute
   '/onboarding': typeof OnboardingRoute
+  '/payment': typeof PaymentRoute
+  '/payment-success': typeof PaymentSuccessRoute
+  '/privacy': typeof PrivacyRoute
   '/salon-portal': typeof SalonPortalRouteWithChildren
   '/sitemap.xml': typeof SitemapDotxmlRoute
   '/superadmin': typeof SuperadminRouteWithChildren
+  '/terms': typeof TermsRoute
   '/waitlist': typeof WaitlistRoute
   '/salon-portal/ai-rules': typeof SalonPortalAiRulesRoute
   '/salon-portal/bookings': typeof SalonPortalBookingsRoute
   '/salon-portal/business': typeof SalonPortalBusinessRoute
   '/salon-portal/inbox': typeof SalonPortalInboxRoute
   '/salon-portal/onboarding': typeof SalonPortalOnboardingRoute
+  '/salon-portal/subscription': typeof SalonPortalSubscriptionRoute
   '/superadmin/login': typeof SuperadminLoginRoute
+  '/superadmin/payments': typeof SuperadminPaymentsRoute
   '/superadmin/salons': typeof SuperadminSalonsRoute
   '/superadmin/settings': typeof SuperadminSettingsRoute
   '/superadmin/subscriptions': typeof SuperadminSubscriptionsRoute
@@ -151,14 +193,20 @@ export interface FileRoutesByTo {
   '/dashboard': typeof DashboardRoute
   '/login': typeof LoginRoute
   '/onboarding': typeof OnboardingRoute
+  '/payment': typeof PaymentRoute
+  '/payment-success': typeof PaymentSuccessRoute
+  '/privacy': typeof PrivacyRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/terms': typeof TermsRoute
   '/waitlist': typeof WaitlistRoute
   '/salon-portal/ai-rules': typeof SalonPortalAiRulesRoute
   '/salon-portal/bookings': typeof SalonPortalBookingsRoute
   '/salon-portal/business': typeof SalonPortalBusinessRoute
   '/salon-portal/inbox': typeof SalonPortalInboxRoute
   '/salon-portal/onboarding': typeof SalonPortalOnboardingRoute
+  '/salon-portal/subscription': typeof SalonPortalSubscriptionRoute
   '/superadmin/login': typeof SuperadminLoginRoute
+  '/superadmin/payments': typeof SuperadminPaymentsRoute
   '/superadmin/salons': typeof SuperadminSalonsRoute
   '/superadmin/settings': typeof SuperadminSettingsRoute
   '/superadmin/subscriptions': typeof SuperadminSubscriptionsRoute
@@ -171,16 +219,22 @@ export interface FileRoutesById {
   '/dashboard': typeof DashboardRoute
   '/login': typeof LoginRoute
   '/onboarding': typeof OnboardingRoute
+  '/payment': typeof PaymentRoute
+  '/payment-success': typeof PaymentSuccessRoute
+  '/privacy': typeof PrivacyRoute
   '/salon-portal': typeof SalonPortalRouteWithChildren
   '/sitemap.xml': typeof SitemapDotxmlRoute
   '/superadmin': typeof SuperadminRouteWithChildren
+  '/terms': typeof TermsRoute
   '/waitlist': typeof WaitlistRoute
   '/salon-portal/ai-rules': typeof SalonPortalAiRulesRoute
   '/salon-portal/bookings': typeof SalonPortalBookingsRoute
   '/salon-portal/business': typeof SalonPortalBusinessRoute
   '/salon-portal/inbox': typeof SalonPortalInboxRoute
   '/salon-portal/onboarding': typeof SalonPortalOnboardingRoute
+  '/salon-portal/subscription': typeof SalonPortalSubscriptionRoute
   '/superadmin/login': typeof SuperadminLoginRoute
+  '/superadmin/payments': typeof SuperadminPaymentsRoute
   '/superadmin/salons': typeof SuperadminSalonsRoute
   '/superadmin/settings': typeof SuperadminSettingsRoute
   '/superadmin/subscriptions': typeof SuperadminSubscriptionsRoute
@@ -194,16 +248,22 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/login'
     | '/onboarding'
+    | '/payment'
+    | '/payment-success'
+    | '/privacy'
     | '/salon-portal'
     | '/sitemap.xml'
     | '/superadmin'
+    | '/terms'
     | '/waitlist'
     | '/salon-portal/ai-rules'
     | '/salon-portal/bookings'
     | '/salon-portal/business'
     | '/salon-portal/inbox'
     | '/salon-portal/onboarding'
+    | '/salon-portal/subscription'
     | '/superadmin/login'
+    | '/superadmin/payments'
     | '/superadmin/salons'
     | '/superadmin/settings'
     | '/superadmin/subscriptions'
@@ -215,14 +275,20 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/login'
     | '/onboarding'
+    | '/payment'
+    | '/payment-success'
+    | '/privacy'
     | '/sitemap.xml'
+    | '/terms'
     | '/waitlist'
     | '/salon-portal/ai-rules'
     | '/salon-portal/bookings'
     | '/salon-portal/business'
     | '/salon-portal/inbox'
     | '/salon-portal/onboarding'
+    | '/salon-portal/subscription'
     | '/superadmin/login'
+    | '/superadmin/payments'
     | '/superadmin/salons'
     | '/superadmin/settings'
     | '/superadmin/subscriptions'
@@ -234,16 +300,22 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/login'
     | '/onboarding'
+    | '/payment'
+    | '/payment-success'
+    | '/privacy'
     | '/salon-portal'
     | '/sitemap.xml'
     | '/superadmin'
+    | '/terms'
     | '/waitlist'
     | '/salon-portal/ai-rules'
     | '/salon-portal/bookings'
     | '/salon-portal/business'
     | '/salon-portal/inbox'
     | '/salon-portal/onboarding'
+    | '/salon-portal/subscription'
     | '/superadmin/login'
+    | '/superadmin/payments'
     | '/superadmin/salons'
     | '/superadmin/settings'
     | '/superadmin/subscriptions'
@@ -256,9 +328,13 @@ export interface RootRouteChildren {
   DashboardRoute: typeof DashboardRoute
   LoginRoute: typeof LoginRoute
   OnboardingRoute: typeof OnboardingRoute
+  PaymentRoute: typeof PaymentRoute
+  PaymentSuccessRoute: typeof PaymentSuccessRoute
+  PrivacyRoute: typeof PrivacyRoute
   SalonPortalRoute: typeof SalonPortalRouteWithChildren
   SitemapDotxmlRoute: typeof SitemapDotxmlRoute
   SuperadminRoute: typeof SuperadminRouteWithChildren
+  TermsRoute: typeof TermsRoute
   WaitlistRoute: typeof WaitlistRoute
 }
 
@@ -292,6 +368,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OnboardingRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/payment': {
+      id: '/payment'
+      path: '/payment'
+      fullPath: '/payment'
+      preLoaderRoute: typeof PaymentRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/payment-success': {
+      id: '/payment-success'
+      path: '/payment-success'
+      fullPath: '/payment-success'
+      preLoaderRoute: typeof PaymentSuccessRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/privacy': {
+      id: '/privacy'
+      path: '/privacy'
+      fullPath: '/privacy'
+      preLoaderRoute: typeof PrivacyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/salon-portal': {
       id: '/salon-portal'
       path: '/salon-portal'
@@ -311,6 +408,13 @@ declare module '@tanstack/react-router' {
       path: '/superadmin'
       fullPath: '/superadmin'
       preLoaderRoute: typeof SuperadminRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/terms': {
+      id: '/terms'
+      path: '/terms'
+      fullPath: '/terms'
+      preLoaderRoute: typeof TermsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/waitlist': {
@@ -362,6 +466,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SalonPortalOnboardingRouteImport
       parentRoute: typeof SalonPortalRoute
     }
+    '/salon-portal/subscription': {
+      id: '/salon-portal/subscription'
+      path: '/subscription'
+      fullPath: '/salon-portal/subscription'
+      preLoaderRoute: typeof SalonPortalSubscriptionRouteImport
+      parentRoute: typeof SalonPortalRoute
+    }
     '/superadmin/': {
       id: '/superadmin/'
       path: '/'
@@ -374,6 +485,13 @@ declare module '@tanstack/react-router' {
       path: '/login'
       fullPath: '/superadmin/login'
       preLoaderRoute: typeof SuperadminLoginRouteImport
+      parentRoute: typeof SuperadminRoute
+    }
+    '/superadmin/payments': {
+      id: '/superadmin/payments'
+      path: '/payments'
+      fullPath: '/superadmin/payments'
+      preLoaderRoute: typeof SuperadminPaymentsRouteImport
       parentRoute: typeof SuperadminRoute
     }
     '/superadmin/salons': {
@@ -406,6 +524,7 @@ interface SalonPortalRouteChildren {
   SalonPortalBusinessRoute: typeof SalonPortalBusinessRoute
   SalonPortalInboxRoute: typeof SalonPortalInboxRoute
   SalonPortalOnboardingRoute: typeof SalonPortalOnboardingRoute
+  SalonPortalSubscriptionRoute: typeof SalonPortalSubscriptionRoute
   SalonPortalIndexRoute: typeof SalonPortalIndexRoute
 }
 
@@ -415,6 +534,7 @@ const SalonPortalRouteChildren: SalonPortalRouteChildren = {
   SalonPortalBusinessRoute: SalonPortalBusinessRoute,
   SalonPortalInboxRoute: SalonPortalInboxRoute,
   SalonPortalOnboardingRoute: SalonPortalOnboardingRoute,
+  SalonPortalSubscriptionRoute: SalonPortalSubscriptionRoute,
   SalonPortalIndexRoute: SalonPortalIndexRoute,
 }
 
@@ -424,6 +544,7 @@ const SalonPortalRouteWithChildren = SalonPortalRoute._addFileChildren(
 
 interface SuperadminRouteChildren {
   SuperadminLoginRoute: typeof SuperadminLoginRoute
+  SuperadminPaymentsRoute: typeof SuperadminPaymentsRoute
   SuperadminSalonsRoute: typeof SuperadminSalonsRoute
   SuperadminSettingsRoute: typeof SuperadminSettingsRoute
   SuperadminSubscriptionsRoute: typeof SuperadminSubscriptionsRoute
@@ -432,6 +553,7 @@ interface SuperadminRouteChildren {
 
 const SuperadminRouteChildren: SuperadminRouteChildren = {
   SuperadminLoginRoute: SuperadminLoginRoute,
+  SuperadminPaymentsRoute: SuperadminPaymentsRoute,
   SuperadminSalonsRoute: SuperadminSalonsRoute,
   SuperadminSettingsRoute: SuperadminSettingsRoute,
   SuperadminSubscriptionsRoute: SuperadminSubscriptionsRoute,
@@ -447,9 +569,13 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardRoute: DashboardRoute,
   LoginRoute: LoginRoute,
   OnboardingRoute: OnboardingRoute,
+  PaymentRoute: PaymentRoute,
+  PaymentSuccessRoute: PaymentSuccessRoute,
+  PrivacyRoute: PrivacyRoute,
   SalonPortalRoute: SalonPortalRouteWithChildren,
   SitemapDotxmlRoute: SitemapDotxmlRoute,
   SuperadminRoute: SuperadminRouteWithChildren,
+  TermsRoute: TermsRoute,
   WaitlistRoute: WaitlistRoute,
 }
 export const routeTree = rootRouteImport

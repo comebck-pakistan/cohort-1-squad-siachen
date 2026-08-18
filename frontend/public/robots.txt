@@ -1,2 +1,15 @@
+# robots.txt — Recepta (Wave 17)
+#
+# Allow indexing of public marketing pages; explicitly block private
+# surfaces (owner portal, superadmin, API). Crawlers should also pick
+# up our sitemap at the URL below.
+
 User-agent: *
 Allow: /
+Disallow: /salon-portal/
+Disallow: /superadmin/
+Disallow: /api/
+Disallow: /payment-success
+Disallow: /onboarding
+
+Sitemap: https://receptaagent.tech/sitemap.xml

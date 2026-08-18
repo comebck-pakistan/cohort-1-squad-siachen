@@ -86,11 +86,28 @@ router.get('/bridge/active-businesses', async (req, res) => {
 router.post('/bridge/inbound', async (req, res) => {
   if (!requireBridgeToken(req, res)) return;
 
-  const { businessId, from, text, messageId } = (req.body || {}) as {
+  // Wave 18: `media` is optional. When present, the message-handler
+  // routes through image-analysis (MiniMax M3 → Gemini 2.5 Flash-Lite
+  // fallback) instead of the text LLM. We accept text alongside media
+  // (WhatsApp image messages can carry a caption). The handler reads
+  // `text` as the caption and `media` as the image payload.
+  const {
+    businessId,
+    from,
+    text,
+    messageId,
+    media,
+  } = (req.body || {}) as {
     businessId?: string;
     from?: string;
     text?: string;
     messageId?: string;
+    media?: {
+      kind?: string;
+      base64?: string;
+      mimeType?: string;
+      filesize?: number;
+    };
   };
 
   if (!businessId || !from || typeof text !== 'string') {
@@ -99,11 +116,43 @@ router.post('/bridge/inbound', async (req, res) => {
     });
   }
 
+  // Validate the image-media payload when present. Reject anything that
+  // isn't a complete image record so we don't half-pipe corrupt bytes
+  // into the LLM.
+  let validatedMedia:
+    | { kind: 'image'; base64: string; mimeType: string; filesize?: number }
+    | undefined;
+  if (media) {
+    if (
+      media.kind !== 'image' ||
+      typeof media.base64 !== 'string' ||
+      media.base64.length === 0 ||
+      typeof media.mimeType !== 'string' ||
+      !media.mimeType.startsWith('image/')
+    ) {
+      return res.status(400).json({
+        error: 'invalid media payload: expected kind=image with base64 + image/* mimeType',
+      });
+    }
+    validatedMedia = {
+      kind: 'image',
+      base64: media.base64,
+      mimeType: media.mimeType,
+      filesize: typeof media.filesize === 'number' ? media.filesize : undefined,
+    };
+  }
+
   try {
     // Reuse the same transport-agnostic entrypoint the Meta Cloud webhook
     // uses — same persistence, same LLM, same booking. Reply comes back
     // unchanged whether the inbound path is web or cloud.
-    const result = await handleIncomingMessage({ businessId, from, text });
+    const result = await handleIncomingMessage({
+      businessId,
+      from,
+      text,
+      ...(validatedMedia ? { media: validatedMedia } : {}),
+      ...(typeof messageId === 'string' ? { messageId } : {}),
+    });
     return res.json({ reply: result.reply });
   } catch (e) {
     log.error(

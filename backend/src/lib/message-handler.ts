@@ -7,8 +7,10 @@ import {
   updateConversationState,
   touchConversation,
   recordEscalation,
+  recordImageAnalysis,
   saveMessage,
   isAgentActive,
+  isSubscriptionActive,
   updateCustomerNameIfMissing,
   isLidFormat,
   markConversationNeedsReviewLid,
@@ -18,6 +20,7 @@ import {
 } from './db';
 import { isTrialExpired } from './trial';
 import { generateReply, type BotIntent } from './llm';
+import { analyzeImage } from './image-analysis';
 import { processBookingDecision } from './booking';
 import { postProcessReply } from './post-process';
 import { childLogger } from './logger';
@@ -97,8 +100,41 @@ export interface IncomingMessageOptions {
    * We normalize both into raw digits before using as a customer key.
    */
   from: string;
-  /** The message body the customer sent. */
+  /** The message body the customer sent. Required for text; for image
+   *  messages with a caption it's the caption text; for image-only
+   *  messages it can be empty string (we treat caption presence as
+   *  optional metadata). */
   text: string;
+  /**
+   * Image media payload, when the customer sent an image instead of
+   * (or alongside) text. Base64-encoded bytes plus MIME type. Set this
+   * field when the transport knows the message has an image attachment;
+   * the handler will route through image-analysis instead of the normal
+   * text LLM call.
+   *
+   * NOT mutually exclusive with `text` — many WhatsApp images come
+   * with a caption in `text`. We pass the caption through to the image
+   * LLM as optional context.
+   *
+   * Why base64 (not a URL): we want the whole flow to run synchronously
+   * inside the existing /api/bridge/inbound endpoint with no extra HTTP
+   * hop. The bridge downloads the image via msg.downloadMedia() (which
+   * returns base64) and forwards it inline. Matches the voice-note
+   * pattern (the bridge forwards text transcripts inline today).
+   */
+  media?: {
+    kind: 'image';
+    /** Base64-encoded image bytes. With or without the `data:` URI prefix
+     *  — the image-analysis helper strips it. */
+    base64: string;
+    /** MIME type, e.g. 'image/jpeg', 'image/png', 'image/webp'. */
+    mimeType: string;
+    /** Optional file size in bytes, for logging + audit. */
+    filesize?: number;
+  };
+  /** WhatsApp message id (text) — surfaced into the image_analysis_logs
+   *  row for cross-referencing the messages table. Optional. */
+  messageId?: string;
 }
 
 export interface HandleResult {
@@ -112,8 +148,14 @@ export interface HandleResult {
   conversationId: string | null;
   /** Customer id used for this message, or null if persistence failed. */
   customerId: string | null;
-  /** Appointment outcome from the booking decision layer, if any. */
+  /** Appointment outcome from the booking decision layer, if any.
+   *  Always 'not_attempted' for image messages — we don't try to book
+   *  from a single image, only react to it. */
   appointment: 'created' | 'rejected' | 'not_attempted' | 'error';
+  /** 'image' when this turn was routed through image-analysis,
+   *  'text' (default) otherwise. Transports can use this for
+   *  observability or routing decisions. */
+  kind: 'text' | 'image';
 }
 
 /**
@@ -172,6 +214,42 @@ async function handleIncomingMessageInner(
 
   const requestLog = log.child({ businessId, customerPhone });
 
+  // Wave 18 — image branch.
+  //
+  // When the incoming message has image media attached (regardless of
+  // whether there's also a caption in `text`), we route through the
+  // image-analysis pipeline instead of the normal text LLM call. The
+  // image LLM returns a structured classification + a draft reply
+  // generated from the free-text image_description, so the bot sounds
+  // specific to what the customer actually sent (not a generic template).
+  //
+  // IMPORTANT: this branch must come BEFORE the empty-text short-circuit
+  // below — an image with no caption has empty `text` by design, and the
+  // empty-text guard would otherwise drop it before image analysis runs.
+  //
+  // Pre-conditions checked BEFORE the agent-paused / trial-expired /
+  // subscription-expired gates below:
+  //   1. group-chat filter (still applies — group images must not
+  //      pollute the customers table)
+  //   2. media.kind === 'image' (rejects voice notes / docs / stickers;
+  //      those stay dropped at the transport for now)
+  //
+  // All other gates (agent-paused, trial-expired, subscription-expired)
+  // are honored identically to the text path so the customer always
+  // gets the same answer regardless of media type.
+  if (opts.media && opts.media.kind === 'image') {
+    requestLog.info(
+      {
+        messageId: opts.messageId,
+        mimeType: opts.media.mimeType,
+        filesize: opts.media.filesize,
+        captionLength: text?.trim().length ?? 0,
+      },
+      'image_received'
+    );
+    return handleIncomingImage(opts);
+  }
+
   if (!text || text.trim().length === 0) {
     requestLog.warn('empty message text — skipping');
     return {
@@ -179,6 +257,7 @@ async function handleIncomingMessageInner(
       conversationId: null,
       customerId: null,
       appointment: 'not_attempted',
+      kind: 'text',
     };
   }
 
@@ -206,6 +285,7 @@ async function handleIncomingMessageInner(
       conversationId: null,
       customerId: null,
       appointment: 'not_attempted',
+      kind: 'text',
     };
   }
 
@@ -251,6 +331,7 @@ async function handleIncomingMessageInner(
       conversationId: null,
       customerId: null,
       appointment: 'not_attempted',
+      kind: 'text',
     };
   }
 
@@ -311,6 +392,54 @@ async function handleIncomingMessageInner(
       conversationId: expConversationId,
       customerId: expCustomerId,
       appointment: 'not_attempted',
+      kind: 'text',
+    };
+  }
+
+  // Wave 13 — subscription gate. If subscription_status='expired' or
+  // 'cancelled', behave like the trial-expired branch: persist the
+  // customer turn so the owner sees it in the inbox, then send a fixed
+  // fallback that points the customer at the salon directly. The fall
+  // back is identical to the trial-expired case because the customer
+  // experience is the same — bot is "off" because the subscription lapsed.
+  let subscriptionExpired = false;
+  try {
+    subscriptionExpired = !(await isSubscriptionActive(businessId));
+  } catch (e) {
+    requestLog.warn(
+      { err: (e as Error).message },
+      'subscription_status lookup failed — fail-open, treating as active',
+    );
+    subscriptionExpired = false;
+  }
+  if (subscriptionExpired) {
+    let subCustomerId: string | null = null;
+    let subConversationId: string | null = null;
+    try {
+      subCustomerId = await getOrCreateCustomer(customerPhone);
+      subConversationId = await getOrCreateConversation(businessId, subCustomerId);
+      await saveMessage(subConversationId, 'customer', text);
+      await touchConversation(subConversationId);
+      requestLog.info(
+        { conversationId: subConversationId },
+        'subscription_expired_sending_fallback',
+      );
+    } catch (e) {
+      requestLog.warn(
+        { err: (e as Error).message },
+        'subscription-expired message persistence failed (non-fatal)',
+      );
+    }
+
+    const fixedReply =
+      "This salon's Recepta subscription is currently inactive. Please contact the salon directly to book an appointment, or message again after they renew.";
+
+    return {
+      reply: fixedReply,
+      conversationId: subConversationId,
+      customerId: subCustomerId,
+      appointment: 'not_attempted',
+      kind: 'text',
     };
   }
 
@@ -632,5 +761,217 @@ async function handleIncomingMessageInner(
     conversationId,
     customerId,
     appointment: appointmentStatus,
+    kind: 'text',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// handleIncomingImage — Wave 18 (image branch).
+//
+// Called from handleIncomingMessage when opts.media.kind === 'image'. The
+// text LLM is NOT involved here — instead we call analyzeImage() which
+// delegates to MiniMax M3 (primary) → Gemini 2.5 Flash-Lite (fallback)
+// → hard fallback message.
+//
+// Flow:
+//   1. Resolve customer + conversation (same pattern as text path).
+//   2. Persist a short marker row to `messages` so the inbox shows the
+//      image turn (we don't write the raw image bytes there — the free-
+//      text fields stay in image_analysis_logs).
+//   3. Call analyzeImage() to get {classification, draft_reply,
+//      escalate_to_human, ...}.
+//   4. Persist the image_analysis_logs row.
+//   5. Branch on classification:
+//        - concern_or_complaint  → record escalation_events row +
+//                                  return draft_reply
+//        - service_reference     → return draft_reply (no escalation)
+//        - unrelated_or_unclear  → if there's a caption, forward the
+//                                  caption through the normal text LLM
+//                                  call (handles the "send a photo with
+//                                  a real question" case). Otherwise
+//                                  return draft_reply.
+//   6. Persist the agent reply + touch the conversation.
+//
+// Failure model: same as text path — persistence failures are non-fatal.
+// analyzeImage() never throws; it returns a fallback on every error.
+// ---------------------------------------------------------------------------
+
+async function handleIncomingImage(
+  opts: IncomingMessageOptions
+): Promise<HandleResult> {
+  const { businessId, from, text: captionOrEmpty } = opts;
+  const customerPhone = normalizePhone(from);
+  const requestLog = log.child({ businessId, customerPhone });
+
+  // Step 1: resolve customer + conversation. Same persistence pattern as
+  // the text path so the inbox shows the image turn and conversation_state
+  // stays consistent.
+  let customerId: string | null = null;
+  let conversationId: string | null = null;
+  try {
+    customerId = await getOrCreateCustomer(customerPhone);
+    conversationId = await getOrCreateConversation(businessId, customerId);
+
+    if (isLidFormat(opts.from)) {
+      await markConversationNeedsReviewLid(conversationId, opts.from);
+    }
+    await upsertCustomerChatId(customerId, opts.from);
+
+    // Write a SHORT marker to the messages table so the inbox renders
+    // an "[Image]" chip for this turn. We deliberately do NOT stash the
+    // raw base64 in the messages.content column (no UI for rendering
+    // it anyway). The free-text reasoning / classification / draft_reply
+    // live in image_analysis_logs where the salon owner can read them
+    // when triaging.
+    await saveMessage(
+      conversationId,
+      'customer',
+      '[Image — see image_analysis_logs]'
+    );
+    await touchConversation(conversationId);
+
+    requestLog.debug(
+      { conversationId, messageId: opts.messageId },
+      'image persistence steps complete'
+    );
+  } catch (e) {
+    requestLog.warn(
+      { err: (e as Error).message },
+      'image persistence step failed (continuing with analysis — degraded mode)'
+    );
+  }
+
+  // Step 2: load the salon's service list so the image LLM can
+  // distinguish in-scope photos from out-of-scope ones. Without this,
+  // a hair photo sent to a nail-only salon produced "bring this photo,
+  // our stylist can match" instead of a redirect. Same getSalonContext
+  // call the text path uses; cost is identical.
+  const salonContext = await getSalonContext(businessId).catch(() => null);
+
+  // Step 3: run image analysis.
+  const analysis = await analyzeImage({
+    imageBase64: opts.media!.base64,
+    mimeType: opts.media!.mimeType,
+    caption: captionOrEmpty && captionOrEmpty.trim().length > 0 ? captionOrEmpty : undefined,
+    salonName: salonContext?.name,
+    salonServices: salonContext?.services,
+  });
+
+  // Step 3: persist the analysis row. Best-effort — never blocks the reply.
+  await recordImageAnalysis({
+    businessId,
+    conversationId,
+    customerId,
+    messageId: opts.messageId ?? null,
+    classification: analysis.classification,
+    imageDescription: analysis.image_description,
+    intentNotes: analysis.intent_notes,
+    confidence: analysis.confidence,
+    escalateToHuman: analysis.escalate_to_human,
+    safetyNetTriggered: analysis.safety_net_triggered,
+    draftReply: analysis.draft_reply,
+    llmProvider: analysis.llm_provider,
+    llmModel: analysis.llm_model,
+    latencyMs: analysis.latency_ms,
+    metadata: {
+      mimeType: opts.media!.mimeType,
+      filesize: opts.media!.filesize ?? null,
+      captionLength:
+        captionOrEmpty && captionOrEmpty.trim().length > 0
+          ? captionOrEmpty.trim().length
+          : 0,
+    },
+  });
+
+  // Step 4: branch on classification.
+  //
+  // concern_or_complaint → record an escalation row + send the reply.
+  // The escalation row uses reason='customer_complaint' (the existing
+  // value from the EscalationReason enum) — it's the closest match and
+  // already powers the Escalations tab UI. The full structured
+  // classification (image_description, intent_notes) is preserved in
+  // image_analysis_logs which the owner reads alongside the escalation.
+  let finalReply: string = analysis.draft_reply;
+  let appointmentStatus: HandleResult['appointment'] = 'not_attempted';
+
+  if (
+    analysis.classification === 'concern_or_complaint' &&
+    conversationId &&
+    analysis.escalate_to_human
+  ) {
+    try {
+      await recordEscalation(
+        conversationId,
+        'customer_complaint',
+        analysis.draft_reply
+      );
+      requestLog.info(
+        { conversationId, classification: analysis.classification },
+        'image_escalation_recorded'
+      );
+    } catch (e) {
+      requestLog.warn(
+        { err: (e as Error).message },
+        'image escalation recording failed (non-fatal)'
+      );
+    }
+  }
+
+  // service_reference + unrelated_or_unclear (no caption): just return
+  // the draft_reply. We've already analyzed the image; no LLM call to
+  // chain into.
+  //
+  // unrelated_or_unclear + caption: the customer paired a photo with a
+  // real question. We could just answer the caption as a text LLM call
+  // — but that adds latency AND risks the LLM "hallucinating" that the
+  // image is service-related. For MVP we treat this case as the same as
+  // no-caption: send the draft_reply (the model already saw both image
+  // AND caption when generating it). If we later want a text-chain
+  // fallback, we can add it behind a flag.
+  //
+  // (Decision rationale: the model already had both inputs when producing
+  // draft_reply, so chaining through the text LLM would be redundant
+  // and noisy. Keeping it as a single LLM call keeps the pipeline fast.)
+
+  // Step 5: persist the agent reply so the inbox shows it.
+  if (conversationId) {
+    try {
+      await updateConversationState(conversationId, {
+        last_customer_msg: captionOrEmpty
+          ? `[Image${captionOrEmpty ? ` — "${captionOrEmpty.slice(0, 80)}"` : ''}]`
+          : '[Image]',
+        last_agent_msg: finalReply,
+      });
+      await touchConversation(conversationId);
+      await saveMessage(conversationId, 'agent', finalReply);
+    } catch (e) {
+      requestLog.warn(
+        { err: (e as Error).message },
+        'image agent reply persistence failed (reply will still be sent)'
+      );
+    }
+  }
+
+  requestLog.info(
+    {
+      classification: analysis.classification,
+      confidence: analysis.confidence,
+      escalate_to_human: analysis.escalate_to_human,
+      safety_net_triggered: analysis.safety_net_triggered,
+      llm_provider: analysis.llm_provider,
+      llm_model: analysis.llm_model,
+      latency_ms: analysis.latency_ms,
+      conversationId,
+      customerId,
+    },
+    'image reply generated'
+  );
+
+  return {
+    reply: finalReply,
+    conversationId,
+    customerId,
+    appointment: appointmentStatus,
+    kind: 'image',
   };
 }

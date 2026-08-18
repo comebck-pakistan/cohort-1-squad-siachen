@@ -1,11 +1,12 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { LayoutDashboard, Store, CreditCard, Settings, Sparkles } from "lucide-react";
+import { LayoutDashboard, Store, CreditCard, Settings, Sparkles, CheckSquare } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const items = [
   { to: "/superadmin", label: "Overview", icon: LayoutDashboard },
   { to: "/superadmin/salons", label: "Salons", icon: Store },
   { to: "/superadmin/subscriptions", label: "Subscriptions", icon: CreditCard },
+  { to: "/superadmin/payments", label: "Payment Approvals", icon: CheckSquare },
   { to: "/superadmin/settings", label: "Settings", icon: Settings },
 ] as const;
 
@@ -30,7 +31,7 @@ export function Sidebar() {
           return (
             <Link
               key={it.to}
-              to={it.to}
+              to={it.to as "/superadmin"}
               className={cn(
                 "flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
                 active

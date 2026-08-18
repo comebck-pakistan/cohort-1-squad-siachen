@@ -6,6 +6,8 @@ import { execFile } from 'child_process';
 import { childLogger } from './logger';
 import { clearChromiumLocks, clearChromiumLocksWithRetry } from './clear-locks';
 import { deliverInboundMessage } from './bridge-client';
+import { diagnoseIncomingImage } from './diagnostics/image-download-diag';
+import { downloadMediaViaWWeb } from './media-download';
 import {
   handleVoiceNote,
   MessageDedupe,
@@ -144,6 +146,19 @@ export class WhatsAppWebClient extends EventEmitter {
   private readonly maxVoiceDurationSec: number;
   private readonly voiceNoteClarification: string;
 
+  // ─── image plumbing (Wave 18) ────────────────────────────────────────────
+  // Reuses MessageDedupe for LRU dedupe on messageId. Per-phone rate
+  // limiting is intentionally omitted in MVP — image LLM calls are
+  // expensive (multimodal) but customer abuse of image sending is rare
+  // in practice. The downstream backend's image-analysis call itself
+  // is the cost gate. Add a rate limit later if abuse appears.
+  private readonly imageDedupe: MessageDedupe;
+  private readonly imagesEnabled: boolean;
+  private readonly imageDownloadEnabled: boolean;
+  private readonly maxImageBytes: number;
+  private readonly imageClarification: string;
+  private readonly diagnoseImageDownloadEnabled: boolean;
+
   constructor(options: WhatsAppWebClientOptions) {
     super();
 
@@ -259,19 +274,6 @@ export class WhatsAppWebClient extends EventEmitter {
         ],
       },
 
-      // VN-22 / VN-23: pin WhatsApp Web to a pre-`2.3000.1042401057` build to
-      // work around the upstream `r: r` media-download break. The break
-      // starts at WA Web 2.3000.1042401057 (whatsapp-web.js issue #201828,
-      // PR #201840). We pin to 2.3000.1042056473 (35 days before the break)
-      // — far enough to avoid inheriting any staged compatibility prep, not
-      // so old that WA servers reject the snapshot. Remove this once a
-      // patched whatsapp-web.js release (containing PR #201840) is published.
-      webVersionCache: {
-        type: 'remote',
-        remotePath:
-          'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1042056473-alpha.html',
-      },
-
       // Give the library more time to authenticate before giving up.
       authTimeoutMs: 60_000,
       qrMaxRetries: 5,
@@ -292,8 +294,36 @@ export class WhatsAppWebClient extends EventEmitter {
     this.voiceNoteClarification =
       "Sorry, I couldn't understand that voice note clearly. Could you type your message or resend?";
 
+    // Image (Wave 18). ENABLE_IMAGES is the master switch — when off,
+    // the bridge silently drops image messages at the dispatch switch
+    // (preserves today's behavior). Default off until the backend's
+    // image-analysis path is verified in production.
+    this.imagesEnabled = process.env.ENABLE_IMAGES === 'true';
+    // Wave-18 fix for the upstream whatsapp-web.js r:r regression
+    // (issue #201828, PR #201840). While the bug is in effect, skip
+    // the broken download path entirely and hand the customer the
+    // clarification text instead. Operators flip this to true once a
+    // patched whatsapp-web.js release is installed.
+    this.imageDownloadEnabled =
+      process.env.IMAGES_PIPELINE_DOWNLOAD === 'true';
+    this.diagnoseImageDownloadEnabled =
+      process.env.DIAGNOSE_IMAGE_DOWNLOAD === 'true';
+    // 5MB cap — matches the bridge's 90s per-attempt timeout budget
+    // for forwarding base64 inline (1.3x JSON inflation + 90s window).
+    // Anything larger would balloon the JSON payload and risk the
+    // backend rejecting it.
+    this.maxImageBytes = Number(process.env.MAX_IMAGE_BYTES) || 5 * 1024 * 1024;
+    this.imageDedupe = new MessageDedupe(500);
+    this.imageClarification =
+      "Got your photo — someone from the team will follow up shortly.";
+
     log.debug(
-      { businessId: this.businessId, sessionDir: this.sessionDir },
+      {
+        businessId: this.businessId,
+        sessionDir: this.sessionDir,
+        imagesEnabled: this.imagesEnabled,
+        maxImageBytes: this.maxImageBytes,
+      },
       'client constructed'
     );
   }
@@ -445,7 +475,8 @@ export class WhatsAppWebClient extends EventEmitter {
    *   - 'chat'      → handleTextMessage
    *   - 'ptt'       → handleVoiceNoteMessage (PTT voice notes)
    *   - 'audio'     → handleVoiceNoteMessage (shared audio files)
-   *   - anything else (image, document, sticker, ...) → drop silently
+   *   - 'image'     → handleImageMessage (Wave 18 — multimodal analysis)
+   *   - anything else (document, sticker, video, ...) → drop silently
    *
    * Each handler is responsible for its own retry/dead-letter logic via
    * `deliverWithRetry`.
@@ -462,8 +493,10 @@ export class WhatsAppWebClient extends EventEmitter {
       case 'ptt':
       case 'audio':
         return this.handleVoiceNoteMessage(msg);
+      case 'image':
+        return this.handleImageMessage(msg);
       default:
-        return; // drop silently (image, document, sticker, etc.)
+        return; // drop silently (document, sticker, video, etc.)
     }
   }
 
@@ -521,6 +554,11 @@ export class WhatsAppWebClient extends EventEmitter {
       rateLimit: this.voiceNoteRateLimit,
       maxDurationSec: this.maxVoiceDurationSec,
       groqApiKey: this.groqApiKey,
+      // Wave 18: route voice notes through the WA-Web-native downloader
+      // to bypass the upstream r:r regression in msg.downloadMedia()
+      // (whatsapp-web.js issue #201828). Voice notes share the same
+      // root cause as images — same library call, same bug, same fix.
+      downloader: (m: Message) => downloadMediaViaWWeb(this.client, m),
     });
 
     if (result.ok) {
@@ -588,6 +626,258 @@ export class WhatsAppWebClient extends EventEmitter {
   }
 
   /**
+   * Image-message handler (Wave 18).
+   *
+   * PRIVACY NOTES (see also `image-analysis.ts` header in backend):
+   *   - Raw image bytes go to a single LLM provider per call
+   *     (MiniMax M3 primary, Gemini 2.5 Flash-Lite fallback). Customer
+   *     identifiers (name, phone, business name) are NEVER sent — only
+   *     the base64 bytes + mime type + optional caption.
+   *   - The base64 payload is NOT persisted server-side. The bridge
+   *     forwards it once and forgets; the backend uses it once and
+   *     forgets; the only thing kept is the structured analysis in
+   *     `image_analysis_logs` (description, intent notes, draft reply)
+   *     — never the bytes themselves.
+   *   - ENABLE_IMAGES must be set in the bridge env before this
+   *     handler runs in production. Ship with it OFF by default;
+   *     flip ON only after the Privacy / Terms disclosure lands and
+   *     providers' data-retention terms are reviewed.
+   *
+   * Flow:
+   *   1. Feature flag (ENABLE_IMAGES). Off → silent drop.
+   *   2. Sanity: msg.from + clientReady + msg.hasMedia.
+   *   3. Dedupe on messageId (LRU) so redeliveries don't double-call.
+   *   4. Download via msg.downloadMedia() — returns
+   *      { data: <base64>, mimetype, filesize }.
+   *   5. Filesize cap (post-download) — protects against huge photos
+   *      blowing past our 90s per-attempt timeout.
+   *   6. Mimetype whitelist — image/* only.
+   *   7. Forward to backend with retry — image kind. Backend's
+   *      message-handler branches on opts.media.kind === 'image'
+   *      and routes through image-analysis.
+   *
+   * Failure paths:
+   *   - download_failed / too_large / unsupported_mime  → send the
+   *     clarification text so the customer isn't left wondering.
+   *   - dedupe_hit / not_ready / no_media / disabled     → silent
+   *     drop with a structured log.
+   */
+  private async handleImageMessage(msg: Message): Promise<void> {
+    const log = childLogger('whatsapp-web.client');
+
+    // 0. Wave-18 diagnostic dump for the upstream r:r regression. Off by
+    // default — flip DIAGNOSE_IMAGE_DOWNLOAD=true in bridge/.env when
+    // investigating. Runs BEFORE the short-circuit and feature gates so
+    // it captures data regardless of whether we attempt the download.
+    // The diagnostic never throws back into this handler.
+    if (this.diagnoseImageDownloadEnabled) {
+      await diagnoseIncomingImage(this.client, msg);
+    }
+
+    // 1a. Download-pipeline gate. While the upstream whatsapp-web.js
+    // r:r regression (issue #201828) is in effect we never call the
+    // broken msg.downloadMedia(); we just send the clarification text.
+    // Re-enable by flipping IMAGES_PIPELINE_DOWNLOAD=true once PR
+    // #201840 lands in a published release.
+    if (!this.imageDownloadEnabled) {
+      log.info(
+        {
+          businessId: this.businessId,
+          from: msg.from,
+          messageId: msg.id?.id,
+          reason: 'pipeline_disabled',
+        },
+        'image_pipeline_short_circuited'
+      );
+      await this.sendImageClarification(msg.from, log);
+      return;
+    }
+
+    // 1. Feature flag.
+    if (!this.imagesEnabled) {
+      log.debug(
+        {
+          businessId: this.businessId,
+          from: msg.from,
+          messageId: msg.id?.id,
+        },
+        'image_messages_disabled_drop'
+      );
+      return;
+    }
+
+    // 2. Sanity.
+    if (!msg.from) {
+      log.debug('image_no_from_drop');
+      return;
+    }
+    if (this.currentStatus !== 'ready') {
+      log.info({ status: this.currentStatus }, 'image_during_init_drop');
+      return;
+    }
+    if (!msg.hasMedia) {
+      log.debug('image_no_media_drop');
+      return;
+    }
+
+    // 3. Dedupe on messageId.
+    if (msg.id?.id && this.imageDedupe.seenBefore(msg.id.id)) {
+      log.info({ messageId: msg.id.id }, 'image_dedupe_hit');
+      return;
+    }
+
+    // 4. Download. whatsapp-web.js returns
+    //    { data: <base64 string>, mimetype: string, filesize?: number }
+    //    or throws. The library sometimes throws non-Error values, so
+    //    we defensively String()-coerce like voice-note/handler.ts does.
+    let media;
+    try {
+      // Wave-18 fix: replace the library's broken msg.downloadMedia()
+      // (which throws "r: r" on WA Web ≥ 2.3000.1043xxx because of the
+      // _serialized → $1 rename, upstream issue #201830) with our own
+      // equivalent in media-download.ts. Uses `_serialized ?? $1 ?? reconstructed`
+      // for the WAWebCollections.Msg lookup and calls
+      // WAWebDownloadManager.downloadAndMaybeDecrypt directly.
+      media = await downloadMediaViaWWeb(this.client, msg);
+    } catch (e) {
+      const errString = (() => {
+        try {
+          return String(e);
+        } catch {
+          return '<unstringifiable>';
+        }
+      })();
+      log.warn(
+        {
+          businessId: this.businessId,
+          from: msg.from,
+          messageId: msg.id?.id,
+          err: errString,
+          errType: (e as Error)?.name ?? typeof e,
+          hasMedia: msg.hasMedia,
+          msgType: msg.type,
+        },
+        'image_download_failed'
+      );
+      await this.sendImageClarification(msg.from, log);
+      return;
+    }
+
+    if (!media?.data) {
+      log.warn(
+        {
+          businessId: this.businessId,
+          from: msg.from,
+          messageId: msg.id?.id,
+        },
+        'image_download_empty'
+      );
+      await this.sendImageClarification(msg.from, log);
+      return;
+    }
+
+    log.info(
+      {
+        businessId: this.businessId,
+        from: msg.from,
+        messageId: msg.id?.id,
+        mimetype: media.mimetype,
+        filesize: media.filesize,
+        captionLength: (msg.body ?? '').length,
+      },
+      'image_downloaded'
+    );
+
+    // 5. Filesize cap (post-download, since `msg` doesn't expose
+    //    filesize for images in all library versions).
+    const filesize = media.filesize ?? estimateBase64Size(media.data);
+    if (filesize > this.maxImageBytes) {
+      log.info(
+        { filesize, cap: this.maxImageBytes },
+        'image_too_large_drop'
+      );
+      await this.sendImageClarification(msg.from, log);
+      return;
+    }
+
+    // 6. Mimetype whitelist — image/* only.
+    const mimeType = (media.mimetype || 'image/jpeg').toLowerCase();
+    if (!mimeType.startsWith('image/')) {
+      log.info(
+        { mimeType, businessId: this.businessId },
+        'image_unsupported_mime_drop'
+      );
+      await this.sendImageClarification(msg.from, log);
+      return;
+    }
+
+    // 7. Forward to backend. Caption (if any) goes in `text` so the
+    //    backend's image-analysis helper can include it as optional
+    //    context for the LLM.
+    const caption = (msg.body ?? '').trim();
+
+    const reply = await this.deliverWithRetry({
+      text: caption,
+      from: msg.from,
+      messageId: msg.id.id,
+      kind: 'image',
+      media: {
+        kind: 'image' as const,
+        base64: media.data,
+        mimeType,
+        filesize,
+      },
+      deadLetterFields: {
+        mimeType,
+        filesize,
+        captionLength: caption.length,
+      },
+      log,
+    });
+
+    if (reply) {
+      try {
+        await this.sendTextMessage(msg.from, reply);
+      } catch (e) {
+        log.warn(
+          {
+            businessId: this.businessId,
+            from: msg.from,
+            err: (e as Error).message ?? String(e),
+          },
+          'image_reply_send_failed'
+        );
+      }
+    }
+
+    // Emit for audit — owner can see image turns in the inbox.
+    this.emit('incoming-message', {
+      businessId: this.businessId,
+      from: msg.from,
+      text: `[Image${caption ? ` — "${caption.slice(0, 80)}"` : ''}]`,
+      messageId: msg.id.id,
+    });
+  }
+
+  /**
+   * Send the image-failure clarification so the customer doesn't see
+   * silence. Mirrors the voice-note clarification path.
+   */
+  private async sendImageClarification(
+    from: string,
+    log: ReturnType<typeof childLogger>
+  ): Promise<void> {
+    try {
+      await this.sendTextMessage(from, this.imageClarification);
+    } catch (e) {
+      log.warn(
+        { from, err: (e as Error).message ?? String(e) },
+        'image_clarification_send_failed'
+      );
+    }
+  }
+
+  /**
    * Shared retry-with-backoff helper. Used by both text and voice-note
    * paths to keep delivery semantics identical. Returns the bot's reply
    * text on success, or null if all retries were exhausted (in which case
@@ -604,7 +894,17 @@ export class WhatsAppWebClient extends EventEmitter {
     text: string;
     from: string;
     messageId: string;
-    kind: 'text' | 'voice-note';
+    kind: 'text' | 'voice-note' | 'image';
+    /** Optional image media payload (Wave 18). When set, the backend
+     *  routes through image-analysis instead of the text LLM. The
+     *  payload includes base64 bytes — kept inline (no multipart) to
+     *  match the existing /api/bridge/inbound contract. */
+    media?: {
+      kind: 'image';
+      base64: string;
+      mimeType: string;
+      filesize?: number;
+    };
     deadLetterFields: Record<string, unknown>;
     log: ReturnType<typeof childLogger>;
   }): Promise<string | null> {
@@ -623,6 +923,7 @@ export class WhatsAppWebClient extends EventEmitter {
             from: args.from,
             text: args.text,
             messageId: args.messageId,
+            media: args.media,
           },
           { timeoutMs: PER_ATTEMPT_TIMEOUT_MS }
         );
@@ -1013,4 +1314,19 @@ export class WhatsAppWebClient extends EventEmitter {
       );
     }
   }
+}
+
+// ─── module-level helpers ──────────────────────────────────────────────────
+
+/**
+ * Best-effort base64 → byte size estimate. whatsapp-web.js returns
+ * media.data as a base64 string but doesn't always populate filesize
+ * for image messages. Inflates by ~4/3, so length/4*3 is an upper
+ * bound — good enough for a "is this under MAX_IMAGE_BYTES" guard.
+ *
+ * Same shape as voice-note/handler.ts:estimateBase64Size so we don't
+ * need to import across the two modules.
+ */
+function estimateBase64Size(b64: string): number {
+  return Math.ceil((b64.length * 3) / 4);
 }

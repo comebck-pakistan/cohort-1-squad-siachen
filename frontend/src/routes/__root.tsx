@@ -14,6 +14,9 @@ import { reportLovableError } from "../lib/lovable-error-reporting";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider } from "@/lib/auth";
 import { SmoothScroll } from "@/components/motion";
+import { Footer } from "@/components/layout/Footer";
+import { MobileStickyCTA } from "@/components/layout/MobileStickyCTA";
+import { PlausibleAnalytics } from "@/components/analytics/PlausibleAnalytics";
 
 function NotFoundComponent() {
   return (
@@ -96,6 +99,9 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
       { name: "twitter:site", content: "@Recepta" },
+      { property: "og:image", content: "/og-image.png" },
+      { property: "og:url", content: "https://receptaagent.tech/" },
+      { name: "twitter:image", content: "/og-image.png" },
     ],
     links: [
       { rel: "stylesheet", href: appCss },
@@ -135,7 +141,12 @@ function RootComponent() {
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
         <SmoothScroll>
-          <Outlet />
+          <div className="flex min-h-screen flex-col">
+            <Outlet />
+            <Footer />
+          </div>
+          <MobileStickyCTA />
+          <PlausibleAnalytics />
         </SmoothScroll>
         <Toaster richColors position="top-right" />
       </AuthProvider>

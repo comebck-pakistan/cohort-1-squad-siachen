@@ -30,6 +30,19 @@ import {
   GroqRateLimitError,
   GroqTimeoutError,
 } from './groq-whisper';
+import type { MediaPayload } from '../media-download';
+
+/**
+ * A function that downloads the bytes for a given WA Web message.
+ *
+ * Defaults to the library's `msg.downloadMedia()` — which is broken on
+ * WA Web ≥ 2.3000.1043xxx (issue #201828, throws `r: r`). The caller
+ * (WhatsAppWebClient) wires in `downloadMediaViaWWeb` to bypass the
+ * broken wrapper. Voice notes share the same r:r regression as images.
+ */
+export type MediaDownloader = (
+  msg: Message
+) => Promise<MediaPayload>;
 
 const log = childLogger('voice-note.handler');
 
@@ -58,6 +71,16 @@ export interface VoiceNoteContext {
   maxDurationSec: number;
   /** Groq API key. Empty string disables transcription (we still log). */
   groqApiKey: string;
+  /**
+   * Function used to download voice-note bytes. Must return
+   * `{ data: base64, mimetype, filesize }`. The default — when callers
+   * pass undefined — is `msg.downloadMedia()`, which is broken on
+   * WA Web ≥ 2.3000.1043xxx (issue #201828, throws `r: r`). The bridge
+   * passes `downloadMediaViaWWeb` from `media-download.ts` to bypass
+   * the broken wrapper. Voice notes share the same r:r regression as
+   * images — same root cause, same workaround.
+   */
+  downloader?: MediaDownloader;
 }
 
 export type VoiceNoteSkipReason =
@@ -188,10 +211,13 @@ export async function handleVoiceNote(
     };
   }
 
-  // 8. Download.
+  // 8. Download. Default to msg.downloadMedia() for callers that haven't
+  // wired the workaround; the bridge passes downloadMediaViaWWeb to bypass
+  // the upstream r:r regression (issue #201828) on WA Web ≥ 2.3000.1043xxx.
   let media;
   try {
-    media = await msg.downloadMedia();
+    const downloader: MediaDownloader = ctx.downloader ?? defaultDownloader;
+    media = await downloader(msg);
   } catch (e) {
     // whatsapp-web.js sometimes throws non-Error values (strings, custom
     // objects). `(e as Error).message` collapses to garbage like "r" when
@@ -309,6 +335,28 @@ export async function handleVoiceNote(
 }
 
 // ─── helpers ───────────────────────────────────────────────────────────────
+
+/**
+ * Default downloader — passes through to the library's
+ * `msg.downloadMedia()`. This is broken on WA Web ≥ 2.3000.1043xxx
+ * (throws `r: r`, issue #201828). Callers should pass a `downloader`
+ * in `VoiceNoteContext` that calls `downloadMediaViaWWeb` instead.
+ *
+ * Kept here so this module is testable in isolation without the WA Web
+ * workaround — tests can mock msg.downloadMedia() directly.
+ */
+async function defaultDownloader(msg: Message): Promise<MediaPayload> {
+  const media = await msg.downloadMedia();
+  // Library typings allow filesize to be null/undefined; our MediaPayload
+  // contract says it's always present. Fall back to the base64 size
+  // estimate so downstream callers see a non-zero value.
+  const filesize = media.filesize ?? estimateBase64Size(media.data);
+  return {
+    data: media.data,
+    mimetype: media.mimetype,
+    filesize,
+  };
+}
 
 function estimateBase64Size(b64: string): number {
   // Base64 inflates by 4/3, with optional padding. Use length / 4 * 3 as

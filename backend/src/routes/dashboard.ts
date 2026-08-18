@@ -1245,6 +1245,168 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
+// Wave 14 — GET /api/business/:businessId/subscription
+//
+// Single composite read for the Salon Owner Subscription tab. Joins:
+//   - businesses columns: subscription_status, plan_id, next_billing_date,
+//     payment_method (added by 20_payment_requests.sql)
+//   - plans row joined on plan_id → plan name/price/features
+//   - most-recent approved payment_requests row → last payment reference
+// Reuses getTrialInfo so the trial clock math stays in one place
+// (lib/trial.ts:48).
+//
+// Defensive nullability on every field so a trial-only salon (plan_id IS
+// NULL) returns cleanly: plan=null, tier=null, last_payment=null.
+// ---------------------------------------------------------------------------
+router.get(
+  '/business/:businessId/subscription',
+  ...owned('businessId'),
+  async (req: Request, res: Response) => {
+    const { businessId } = req.params;
+    const supabase = getSupabase();
+
+    // Three reads in parallel: trial info + business+plan join + last
+    // approved payment. All non-fatal — if any single query fails, we
+    // still return the others with neutral defaults.
+    const [trialInfo, bizResult, paymentResult] = await Promise.all([
+      getTrialInfo(businessId).catch((e) => {
+        log.warn(
+          { err: (e as Error).message, businessId },
+          'subscription: getTrialInfo threw, using safe default',
+        );
+        return {
+          status: 'active' as const,
+          endsAt: null,
+          startedAt: null,
+          isExpired: false,
+          daysRemaining: null,
+        };
+      }),
+      supabase
+        .from('businesses')
+        .select(
+          'plan_id, subscription_status, next_billing_date, payment_method, plans:plan_id ( id, name, monthly_price_pkr, description, features, sort_order )'
+        )
+        .eq('id', businessId)
+        .maybeSingle(),
+      supabase
+        .from('payment_requests')
+        .select(
+          'id, amount_pkr, payment_method, reviewed_at, transaction_reference'
+        )
+        .eq('business_id', businessId)
+        .eq('status', 'approved')
+        .order('reviewed_at', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+    ]);
+
+    if (bizResult.error) {
+      log.warn(
+        { err: bizResult.error.message, businessId },
+        'subscription: business lookup failed',
+      );
+      return res.status(500).json({ error: bizResult.error.message });
+    }
+
+    const biz = bizResult.data as unknown as {
+      plan_id: string | null;
+      subscription_status: string | null;
+      next_billing_date: string | null;
+      payment_method: string | null;
+      plans:
+        | {
+            id: string;
+            name: string;
+            monthly_price_pkr: number;
+            description: string | null;
+            features: Record<string, boolean> | null;
+            sort_order: number;
+          }
+        | { id: string; name: string; monthly_price_pkr: number; description: string | null; features: Record<string, boolean> | null; sort_order: number }[]
+        | null;
+    } | null;
+
+    const planRecord = biz ? pickJoin<{
+      id: string;
+      name: string;
+      monthly_price_pkr: number;
+      description: string | null;
+      features: Record<string, boolean> | null;
+      sort_order: number;
+    }>(biz.plans) : undefined;
+
+    // Derive `tier` from plan name (lowercased) when it matches the
+    // known vocabulary. Null when no plan row is attached (trial-only
+    // or pre-Wave-13 rows).
+    const rawTier = planRecord?.name?.toLowerCase() ?? null;
+    const tier: 'basic' | 'pro' | null =
+      rawTier === 'basic' || rawTier === 'pro' ? rawTier : null;
+
+    const plan = planRecord
+      ? {
+          id: planRecord.id,
+          name: planRecord.name,
+          monthly_price_pkr: planRecord.monthly_price_pkr,
+          description: planRecord.description,
+          features: planRecord.features ?? {},
+          sort_order: planRecord.sort_order,
+        }
+      : null;
+
+    // Subscription status on the businesses row. The migration added
+    // the column with NOT NULL DEFAULT 'none', so this is effectively
+    // never null — we still defend.
+    const subscriptionStatus: string = biz?.subscription_status ?? 'none';
+
+    // Last approved payment — already .maybeSingle() so missing rows
+    // come back as null data.
+    const last = paymentResult.data as unknown as {
+      id: string;
+      amount_pkr: number;
+      payment_method: 'jazzcash' | 'easypaisa' | 'bank_transfer';
+      reviewed_at: string;
+      transaction_reference: string | null;
+    } | null;
+
+    const lastPayment = last
+      ? {
+          id: last.id,
+          amount_pkr: last.amount_pkr,
+          payment_method: last.payment_method,
+          reviewed_at: last.reviewed_at,
+          transaction_reference: last.transaction_reference,
+        }
+      : null;
+
+    // payment_method on businesses is set when the superadmin
+    // approves a payment. Null on trial-only / pre-Wave-13 rows.
+    const rawPaymentMethod = biz?.payment_method ?? null;
+    const paymentMethod: 'jazzcash' | 'easypaisa' | 'bank_transfer' | null =
+      rawPaymentMethod === 'jazzcash' ||
+      rawPaymentMethod === 'easypaisa' ||
+      rawPaymentMethod === 'bank_transfer'
+        ? rawPaymentMethod
+        : null;
+
+    return res.json({
+      businessId,
+      plan,
+      tier,
+      subscription_status: subscriptionStatus,
+      trial_status: trialInfo.status,
+      trial_started_at: trialInfo.startedAt,
+      trial_ends_at: trialInfo.endsAt,
+      days_remaining: trialInfo.daysRemaining,
+      is_expired: trialInfo.isExpired,
+      next_billing_date: biz?.next_billing_date ?? null,
+      payment_method: paymentMethod,
+      last_payment: lastPayment,
+    });
+  }
+);
+
+// ---------------------------------------------------------------------------
 // Bonus helper endpoints (used by UI for dropdowns / pickers)
 // ---------------------------------------------------------------------------
 
