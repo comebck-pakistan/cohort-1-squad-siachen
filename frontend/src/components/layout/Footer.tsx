@@ -33,6 +33,7 @@ const COMPANY_LINKS = [
   { to: "/privacy", label: "Privacy Policy" },
   { to: "/terms", label: "Terms of Service" },
   { to: "/waitlist", label: "Join the waitlist" },
+  { to: "/superadmin/login", label: "Super admin" },
 ];
 
 export function Footer() {
@@ -98,7 +99,7 @@ export function Footer() {
               ))}
               <li>
                 <Link to="/login" className="hover:text-foreground">
-                  Log in
+                  Salon owner log in
                 </Link>
               </li>
             </ul>

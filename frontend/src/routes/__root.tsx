@@ -4,6 +4,7 @@ import {
   Link,
   createRootRouteWithContext,
   useRouter,
+  useRouterState,
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
@@ -137,15 +138,25 @@ function RootShell({ children }: { children: ReactNode }) {
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
 
+  // Hide public-only chrome (Footer + MobileStickyCTA) on authenticated
+  // dashboards. The product/company/support/PRICING links in the footer
+  // have zero relevance to a logged-in salon owner or superadmin — they
+  // pollute the working surface. Public marketing/auth pages still get
+  // them. Path-based check (not auth-based) so we don't flash the footer
+  // during the brief unauthenticated window on /superadmin/login.
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const isAuthedDashboard =
+    pathname.startsWith("/salon-portal") || pathname.startsWith("/superadmin");
+
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
         <SmoothScroll>
           <div className="flex min-h-screen flex-col">
             <Outlet />
-            <Footer />
+            {!isAuthedDashboard && <Footer />}
           </div>
-          <MobileStickyCTA />
+          {!isAuthedDashboard && <MobileStickyCTA />}
           <PlausibleAnalytics />
         </SmoothScroll>
         <Toaster richColors position="top-right" />

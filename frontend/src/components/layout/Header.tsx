@@ -10,12 +10,16 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { initials, useAuth } from "@/lib/auth";
+import { MaintenanceBadge } from "@/components/maintenance/MaintenanceBadge";
 import { toast } from "sonner";
 
 const titles: Record<string, { title: string; subtitle: string }> = {
   "/superadmin": { title: "Overview", subtitle: "Global operational health across all tenants" },
   "/superadmin/salons": { title: "Salons", subtitle: "Directory of tenant salon instances" },
   "/superadmin/subscriptions": { title: "Subscriptions", subtitle: "Revenue analytics and payment logs" },
+  "/superadmin/payments": { title: "Payment approvals", subtitle: "Review and approve pending payment submissions" },
+  "/superadmin/maintenance": { title: "Maintenance", subtitle: "System mode controls — pause customer-facing AI" },
+  "/superadmin/notifications": { title: "Notifications", subtitle: "Push company-wide announcements to every dashboard" },
   "/superadmin/settings": { title: "Settings", subtitle: "Tier limits and AI platform safety rules" },
 };
 
@@ -38,6 +42,7 @@ export function Header() {
         <p className="text-xs text-muted-foreground">{meta.subtitle}</p>
       </div>
       <div className="flex items-center gap-3">
+        <MaintenanceBadge />
         <div className="relative hidden sm:block">
           <Search className="size-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <Input placeholder="Search salons, IDs, numbers…" className="pl-9 w-72 bg-background" />

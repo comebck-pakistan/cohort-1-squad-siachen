@@ -1,5 +1,5 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { LayoutDashboard, Store, CreditCard, Settings, Sparkles, CheckSquare } from "lucide-react";
+import { LayoutDashboard, Store, CreditCard, Settings, Sparkles, CheckSquare, Wrench, Megaphone } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const items = [
@@ -7,6 +7,8 @@ const items = [
   { to: "/superadmin/salons", label: "Salons", icon: Store },
   { to: "/superadmin/subscriptions", label: "Subscriptions", icon: CreditCard },
   { to: "/superadmin/payments", label: "Payment Approvals", icon: CheckSquare },
+  { to: "/superadmin/maintenance", label: "Maintenance", icon: Wrench },
+  { to: "/superadmin/notifications", label: "Notifications", icon: Megaphone },
   { to: "/superadmin/settings", label: "Settings", icon: Settings },
 ] as const;
 

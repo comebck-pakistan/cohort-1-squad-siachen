@@ -5,6 +5,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useTenantBusinessId } from "@/lib/useTenantBusinessId";
 import { api, qk } from "@/lib/api";
 import { SubscriptionPanel } from "./SubscriptionPanel";
+import { GlobalNotificationBanner } from "@/components/notifications/GlobalNotificationBanner";
+import { TenantMaintenanceBanner } from "@/components/maintenance/TenantMaintenanceBanner";
 import {
   LayoutDashboard,
   MessagesSquare,
@@ -321,6 +323,8 @@ export function TenantShell() {
 
       {/* Main */}
       <div className="flex-1 flex flex-col min-w-0">
+        <TenantMaintenanceBanner />
+        <GlobalNotificationBanner />
         {/* Top bar */}
         <header className="h-16 bg-white border-b px-4 md:px-6 flex items-center justify-between gap-4">
           <button

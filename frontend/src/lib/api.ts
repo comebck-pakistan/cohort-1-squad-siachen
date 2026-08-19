@@ -3,6 +3,12 @@ import type {
   Business,
   CreateSalonInput,
   KPI,
+  MaintenanceAuditAction,
+  MaintenanceAuditRow,
+  MaintenanceState,
+  MaintenanceWindowRow,
+  NotificationRow,
+  NotificationSeverity,
   OnboardingStatus,
   PaymentLog,
   RevenuePoint,
@@ -1264,6 +1270,161 @@ export const api = {
       `/api/superadmin/payments/${id}/screenshot-url`,
       () => ({ url: "", expiresInSec: 600 }),
     ),
+
+  // -------------------------------------------------------------------------
+  // Wave 19 — Maintenance System Mode
+  //
+  // All helpers use `request()` (not `withMock()`) because fail-closed
+  // semantics must not be masked by fixtures. If the backend is down the
+  // UI will show the real error instead of a stale "off" state.
+  // -------------------------------------------------------------------------
+
+  getMaintenanceState: (params?: { salonId?: string }) =>
+    request<{ state: MaintenanceState }>(
+      `/api/maintenance/state${params?.salonId ? `?salonId=${params.salonId}` : ""}`,
+    ),
+
+  /** Tenant-readable: returns the effective maintenance state for the
+   *  caller's own business (no superadmin required, no ?salonId=). */
+  getEffectiveMaintenanceState: () =>
+    request<{ state: MaintenanceState }>(`/api/maintenance/effective`),
+
+  getMaintenanceWindows: (params?: {
+    scope?: "global" | "salon";
+    salonId?: string;
+    openOnly?: boolean;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.scope) qs.set("scope", params.scope);
+    if (params?.salonId) qs.set("salonId", params.salonId);
+    if (params?.openOnly) qs.set("openOnly", "true");
+    if (params?.limit) qs.set("limit", String(params.limit));
+    const suffix = qs.toString();
+    return request<{ windows: MaintenanceWindowRow[] }>(
+      `/api/maintenance/windows${suffix ? `?${suffix}` : ""}`,
+    );
+  },
+
+  getMaintenanceAudit: (params?: {
+    windowId?: string;
+    businessId?: string;
+    action?: MaintenanceAuditAction;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.windowId) qs.set("windowId", params.windowId);
+    if (params?.businessId) qs.set("businessId", params.businessId);
+    if (params?.action) qs.set("action", params.action);
+    if (params?.limit) qs.set("limit", String(params.limit));
+    const suffix = qs.toString();
+    return request<{ entries: MaintenanceAuditRow[] }>(
+      `/api/maintenance/audit${suffix ? `?${suffix}` : ""}`,
+    );
+  },
+
+  enableGlobalMaintenance: (body: {
+    message: string;
+    cooldownMinutes?: number;
+    startsAt?: string;
+    endsAt?: string;
+    reason?: string;
+  }) =>
+    request<{ window: MaintenanceWindowRow }>(
+      "/api/maintenance/global/enable",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  disableGlobalMaintenance: (body?: { reason?: string }) =>
+    request<{ closed: MaintenanceWindowRow }>(
+      "/api/maintenance/global/disable",
+      { method: "POST", body: JSON.stringify(body ?? {}) },
+    ),
+
+  enableSalonMaintenance: (
+    salonId: string,
+    body: {
+      message: string;
+      cooldownMinutes?: number;
+      startsAt?: string;
+      endsAt?: string;
+      reason?: string;
+    },
+  ) =>
+    request<{ window: MaintenanceWindowRow }>(
+      `/api/maintenance/salon/${salonId}/enable`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  disableSalonMaintenance: (salonId: string, body?: { reason?: string }) =>
+    request<{ closed: MaintenanceWindowRow }>(
+      `/api/maintenance/salon/${salonId}/disable`,
+      { method: "POST", body: JSON.stringify(body ?? {}) },
+    ),
+
+  updateMaintenanceWindow: (
+    windowId: string,
+    body: {
+      message?: string;
+      cooldownMinutes?: number;
+      endsAt?: string;
+      reason?: string;
+    },
+  ) =>
+    request<{ window: MaintenanceWindowRow }>(
+      `/api/maintenance/window/${windowId}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    ),
+
+  // -------------------------------------------------------------------------
+  // Wave 20 — Global Notifications
+  //
+  // All helpers use `request()` (not `withMock()`) so an outage is visible
+  // to the operator instead of masked by a fake empty list.
+  // -------------------------------------------------------------------------
+
+  /** Any logged-in user (tenant or superadmin) — hot marquee read. */
+  getActiveNotification: () =>
+    request<{ notification: NotificationRow | null }>(
+      "/api/notifications/active",
+    ),
+
+  /** Superadmin: list every notification (active + archived). */
+  listNotifications: () =>
+    request<{ notifications: NotificationRow[] }>("/api/notifications"),
+
+  createNotification: (body: {
+    title: string;
+    body: string;
+    severity: NotificationSeverity;
+    startsAt?: string;
+    endsAt?: string | null;
+  }) =>
+    request<{ notification: NotificationRow }>("/api/notifications", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  updateNotification: (
+    id: string,
+    body: Partial<{
+      title: string;
+      body: string;
+      severity: NotificationSeverity;
+      startsAt: string;
+      endsAt: string | null;
+    }>,
+  ) =>
+    request<{ notification: NotificationRow }>(
+      `/api/notifications/${id}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    ),
+
+  archiveNotification: (id: string) =>
+    request<{ notification: NotificationRow }>(
+      `/api/notifications/${id}`,
+      { method: "DELETE" },
+    ),
 };
 
 export const qk = {
@@ -1302,4 +1463,16 @@ export const qk = {
   pendingPayments: (status?: string) =>
     ["payments", "pending", status ?? "all"] as const,
   paymentDetail: (id: string) => ["payments", id] as const,
+  // Wave 19 — Maintenance System Mode
+  maintenanceState: ["maintenance", "state"] as const,
+  maintenanceEffective: ["maintenance", "effective"] as const,
+  maintenanceWindows: (params?: { openOnly?: boolean }) =>
+    ["maintenance", "windows", params ?? {}] as const,
+  maintenanceAudit: (params?: {
+    action?: MaintenanceAuditAction;
+    windowId?: string;
+  }) => ["maintenance", "audit", params ?? {}] as const,
+  // Wave 20 — Global Notifications
+  notificationsActive: ["notifications", "active"] as const,
+  notificationsList: ["notifications", "list"] as const,
 };
