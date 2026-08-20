@@ -115,3 +115,84 @@ export interface CreateSalonInput {
   whatsappNumber: string;
   city?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Wave 19 — Maintenance System Mode UI types.
+// Mirrors backend/src/lib/maintenance/types.ts response shapes exactly.
+// ---------------------------------------------------------------------------
+
+export interface MaintenanceState {
+  enabled: boolean;
+  scope: "global" | "salon";
+  bypassed: boolean;
+  message: string;
+  cooldownMinutes: number;
+  startsAt: string | null;
+  endsAt: string | null;
+  windowId: string | null;
+  inferred: boolean;
+}
+
+export interface MaintenanceWindowRow {
+  id: string;
+  scope: "global" | "salon";
+  salon_id: string | null;
+  enabled: boolean;
+  reason: string | null;
+  message: string;
+  cooldown_minutes: number;
+  starts_at: string;
+  ends_at: string | null;
+  source: "admin" | "system";
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  closed_at: string | null;
+  closed_by: string | null;
+}
+
+export type MaintenanceAuditAction =
+  | "enabled"
+  | "disabled"
+  | "updated"
+  | "expired"
+  | "lookup_failed"
+  | "response_sent"
+  | "response_suppressed";
+
+export interface MaintenanceAuditRow {
+  id: string;
+  window_id: string | null;
+  business_id: string | null;
+  action: MaintenanceAuditAction;
+  actor_id: string | null;
+  actor_type: "superadmin" | "system";
+  scope: "global" | "salon" | null;
+  affected_salons: string[] | null;
+  previous_state: Record<string, unknown> | null;
+  new_state: Record<string, unknown> | null;
+  reason: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Wave 20 — Global Notifications
+// ---------------------------------------------------------------------------
+
+export type NotificationSeverity = "info" | "warning" | "critical";
+
+export interface NotificationRow {
+  id: string;
+  title: string;
+  body: string;
+  severity: NotificationSeverity;
+  active: boolean;
+  starts_at: string;
+  ends_at: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  archived_at: string | null;
+  archived_by: string | null;
+}

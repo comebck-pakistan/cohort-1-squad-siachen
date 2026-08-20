@@ -12,6 +12,7 @@ import {
   handleVoiceNote,
   MessageDedupe,
   VoiceNoteRateLimit,
+  isGroupChat,
   type VoiceNoteContext,
 } from './voice-note';
 
@@ -485,6 +486,25 @@ export class WhatsAppWebClient extends EventEmitter {
     if (msg.fromMe) return;
     if (msg.isStatus) return;
     if (!msg.from) return;
+
+    // Group-chat pre-filter (applies to ALL message types — text, voice,
+    // image). Mirrors the backend filter at backend/src/lib/message-handler.ts
+    // so we never even hit the network for a group JID. The voice-note
+    // handler has its own group check too, but doing it here means:
+    //   - text:    no /api/bridge/inbound round-trip, no log noise
+    //   - image:   no downloadMedia call, no LLM quota burned
+    //   - voice:   no Groq Whisper call (handler still re-checks defensively)
+    //
+    // Same helper as voice-note/handler.ts so the @g.us / bare-numeric /
+    // LID-@g.us cases stay in sync.
+    if (isGroupChat(msg.from)) {
+      const log = childLogger('whatsapp-web.client');
+      log.info(
+        { from: msg.from, msgType: msg.type, messageId: msg.id?.id },
+        'group_chat_skipped_at_bridge'
+      );
+      return;
+    }
 
     switch (msg.type) {
       case 'chat':

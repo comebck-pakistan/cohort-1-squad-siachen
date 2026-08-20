@@ -24,6 +24,7 @@ import { analyzeImage } from './image-analysis';
 import { processBookingDecision } from './booking';
 import { postProcessReply } from './post-process';
 import { childLogger } from './logger';
+import { enforceMaintenance, FALLBACK_MAINTENANCE_MESSAGE } from './maintenance';
 
 // ---------------------------------------------------------------------------
 // Transport-agnostic message handler.
@@ -229,37 +230,18 @@ async function handleIncomingMessageInner(
   //
   // Pre-conditions checked BEFORE the agent-paused / trial-expired /
   // subscription-expired gates below:
-  //   1. group-chat filter (still applies — group images must not
-  //      pollute the customers table)
   //   2. media.kind === 'image' (rejects voice notes / docs / stickers;
   //      those stay dropped at the transport for now)
+  //
+  // The group-chat filter (item 1) is checked FIRST — below this comment
+  // — so group images don't burn image-LLM quota or pollute the customers
+  // table. The order matters: a group image with no caption would hit
+  // the image branch BEFORE the group filter, sending the LLM to work on
+  // a non-actionable message.
   //
   // All other gates (agent-paused, trial-expired, subscription-expired)
   // are honored identically to the text path so the customer always
   // gets the same answer regardless of media type.
-  if (opts.media && opts.media.kind === 'image') {
-    requestLog.info(
-      {
-        messageId: opts.messageId,
-        mimeType: opts.media.mimeType,
-        filesize: opts.media.filesize,
-        captionLength: text?.trim().length ?? 0,
-      },
-      'image_received'
-    );
-    return handleIncomingImage(opts);
-  }
-
-  if (!text || text.trim().length === 0) {
-    requestLog.warn('empty message text — skipping');
-    return {
-      reply: null,
-      conversationId: null,
-      customerId: null,
-      appointment: 'not_attempted',
-      kind: 'text',
-    };
-  }
 
   // Group-chat / non-personal-chat filter.
   //
@@ -280,6 +262,40 @@ async function handleIncomingMessageInner(
       { from },
       'group_chat_skipped — not a 1:1 customer message'
     );
+    return {
+      reply: null,
+      conversationId: null,
+      customerId: null,
+      appointment: 'not_attempted',
+      kind: 'text',
+    };
+  }
+
+  // Image branch — runs AFTER the group filter so group images are
+  // dropped before any LLM call or DB write. The image path accepts an
+  // empty caption (text.trim().length === 0 is a valid image-only
+  // message), so this branch must come BEFORE the empty-text guard.
+  // Pre-conditions checked before reaching here:
+  //   1. group-chat filter (skipped groups, see above)
+  //   2. (media.kind === 'image' — see conditional)
+  //
+  // All other gates (agent-paused, trial-expired, subscription-expired)
+  // are honored inside handleIncomingImage identically to the text path.
+  if (opts.media && opts.media.kind === 'image') {
+    requestLog.info(
+      {
+        messageId: opts.messageId,
+        mimeType: opts.media.mimeType,
+        filesize: opts.media.filesize,
+        captionLength: text?.trim().length ?? 0,
+      },
+      'image_received'
+    );
+    return handleIncomingImage(opts);
+  }
+
+  if (!text || text.trim().length === 0) {
+    requestLog.warn('empty message text — skipping');
     return {
       reply: null,
       conversationId: null,
@@ -443,10 +459,100 @@ async function handleIncomingMessageInner(
     };
   }
 
-  requestLog.info({ textLength: text.length }, 'incoming message');
-
-  let conversationId: string | null = null;
+  // Declared early so the maintenance gate (which mirrors the
+  // agent_paused/subscription_expired persistence pattern) can read them.
   let customerId: string | null = null;
+  let conversationId: string | null = null;
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Step 3.5: Maintenance System Mode gate (superadmin-controlled kill
+  // switch). This sits BEFORE the LLM call, BEFORE processBookingDecision,
+  // and BEFORE every other DB mutation caused by the customer request. The
+  // maintenance module is fail-closed — a resolver DB outage surfaces
+  // FALLBACK_MAINTENANCE_MESSAGE rather than letting business operations
+  // run unprotected.
+  //
+  // Mirrors the agent_paused / subscription_expired template above for
+  // persistence behavior: customer + conversation + raw message are
+  // written so the owner can read the inbound in the thread, and the
+  // customer gets either the configured maintenance reply or null (when
+  // their (salon, customer) pair is in the per-customer cooldown window).
+  //
+  // The maintenance gate covers BOTH text and image paths because the
+  // check runs inside handleIncomingMessageInner (upstream of the image
+  // fork). Image analysis (analyzeImage) is therefore unreachable while
+  // maintenance is enabled.
+  // ────────────────────────────────────────────────────────────────────────
+  let maintenance = await enforceMaintenance({
+    salonId: businessId,
+    from,
+  }).catch((e) => {
+    requestLog.warn(
+      { err: (e as Error).message },
+      'maintenance enforce threw — treating as blocked (fail-closed)',
+    );
+    return {
+      blocked: true,
+      reply: FALLBACK_MAINTENANCE_MESSAGE,
+      state: {
+        enabled: true,
+        scope: 'global' as const,
+        bypassed: false,
+        message: FALLBACK_MAINTENANCE_MESSAGE,
+        cooldownMinutes: 30,
+        startsAt: null,
+        endsAt: null,
+        windowId: null,
+        inferred: true,
+      },
+      suppressedByCooldown: false,
+    };
+  });
+
+  if (maintenance.blocked) {
+    let maintenanceCustomerId: string | null = customerId;
+    let maintenanceConversationId: string | null = conversationId;
+    try {
+      if (!maintenanceCustomerId) {
+        maintenanceCustomerId = await getOrCreateCustomer(customerPhone);
+      }
+      if (!maintenanceConversationId) {
+        maintenanceConversationId = await getOrCreateConversation(
+          businessId,
+          maintenanceCustomerId,
+        );
+      }
+      await saveMessage(maintenanceConversationId, 'customer', text);
+      await touchConversation(maintenanceConversationId);
+    } catch (e) {
+      requestLog.warn(
+        { err: (e as Error).message },
+        'maintenance-mode message persistence failed (non-fatal)',
+      );
+    }
+    requestLog.info(
+      {
+        maintenance: {
+          scope: maintenance.state.scope,
+          windowId: maintenance.state.windowId,
+          suppressedByCooldown: maintenance.suppressedByCooldown,
+          inferred: maintenance.state.inferred,
+        },
+      },
+      maintenance.suppressedByCooldown
+        ? 'maintenance_response_suppressed'
+        : 'maintenance_response_sent',
+    );
+    return {
+      reply: maintenance.suppressedByCooldown ? null : maintenance.reply,
+      customerId: maintenanceCustomerId,
+      conversationId: maintenanceConversationId,
+      appointment: 'not_attempted',
+      kind: 'text',
+    };
+  }
+
+  requestLog.info({ textLength: text.length }, 'incoming message');
 
   // Steps 1–3: customer lookup, conversation lookup, state update
   //

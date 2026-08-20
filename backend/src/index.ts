@@ -21,9 +21,13 @@ import freeTrialSignupRouter from './routes/free-trial-signup';
 import waitlistRouter from './routes/waitlist';
 import paymentsRouter from './routes/payments';
 import superadminPaymentsRouter from './routes/superadmin-payments';
+import maintenanceRouter from './lib/maintenance/routes';
+import { notificationsRouter } from './lib/notifications/routes';
 import { logger, childLogger } from './lib/logger';
 import { startTrialExpiryJob } from './jobs/trial-expiry';
 import { startSubscriptionExpiryJob } from './jobs/subscription-expiry';
+import { startMaintenanceCleanupJob } from './jobs/maintenance-cleanup';
+import { startNotificationsCleanupJob } from './jobs/notifications-cleanup';
 import { stopAllJobs } from './lib/scheduler';
 
 // ---------------------------------------------------------------------------
@@ -141,6 +145,12 @@ app.use('/api', waitlistRouter);
 // superadmin reviews under /api/superadmin/payments.
 app.use('/api', paymentsRouter);
 app.use('/api', superadminPaymentsRouter);
+// Maintenance System Mode — superadmin-only kill switch. See
+// backend/src/lib/maintenance/ for the resolver, audit, and enforcement.
+app.use('/api', maintenanceRouter);
+// Wave 20 — Global Notification banner. /active is tenant-readable;
+// CRUD endpoints are superadmin-only. See backend/src/lib/notifications/.
+app.use('/api/notifications', notificationsRouter);
 // Onboarding proxy — /onboarding/:id/* is forwarded to the bridge service
 // (Phase 1). Mounted at root because the path is part of the URL space shared
 // with the bridge's own QR server.
@@ -186,6 +196,15 @@ const server = app.listen(PORT, () => {
   // Wave 13 — subscription-expiry job. Hourly: lock agents whose
   // subscription_status='active' and next_billing_date has passed.
   startSubscriptionExpiryJob();
+  // Maintenance System Mode — cleanup job. Closes windows whose ends_at has
+  // passed (the SQL resolver already filters these out, so this is just
+  // an optimization for observability) and prunes stale cooldown rows.
+  // Runs every 60s so admin toggles take effect quickly.
+  startMaintenanceCleanupJob();
+  // Wave 20 — Global Notifications cleanup. Soft-archives expired
+  // notifications every 60s for storage hygiene. The /active SQL filter
+  // already hides them, so this is observability + list cleanliness.
+  startNotificationsCleanupJob();
 });
 
 // ---------------------------------------------------------------------------

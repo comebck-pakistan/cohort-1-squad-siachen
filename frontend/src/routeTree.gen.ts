@@ -30,6 +30,8 @@ import { Route as SalonPortalOnboardingRouteImport } from './routes/salon-portal
 import { Route as SalonPortalSubscriptionRouteImport } from './routes/salon-portal.subscription'
 import { Route as SuperadminIndexRouteImport } from './routes/superadmin.index'
 import { Route as SuperadminLoginRouteImport } from './routes/superadmin.login'
+import { Route as SuperadminMaintenanceRouteImport } from './routes/superadmin.maintenance'
+import { Route as SuperadminNotificationsRouteImport } from './routes/superadmin.notifications'
 import { Route as SuperadminPaymentsRouteImport } from './routes/superadmin.payments'
 import { Route as SuperadminSalonsRouteImport } from './routes/superadmin.salons'
 import { Route as SuperadminSettingsRouteImport } from './routes/superadmin.settings'
@@ -140,6 +142,16 @@ const SuperadminLoginRoute = SuperadminLoginRouteImport.update({
   path: '/login',
   getParentRoute: () => SuperadminRoute,
 } as any)
+const SuperadminMaintenanceRoute = SuperadminMaintenanceRouteImport.update({
+  id: '/maintenance',
+  path: '/maintenance',
+  getParentRoute: () => SuperadminRoute,
+} as any)
+const SuperadminNotificationsRoute = SuperadminNotificationsRouteImport.update({
+  id: '/notifications',
+  path: '/notifications',
+  getParentRoute: () => SuperadminRoute,
+} as any)
 const SuperadminPaymentsRoute = SuperadminPaymentsRouteImport.update({
   id: '/payments',
   path: '/payments',
@@ -181,6 +193,8 @@ export interface FileRoutesByFullPath {
   '/salon-portal/onboarding': typeof SalonPortalOnboardingRoute
   '/salon-portal/subscription': typeof SalonPortalSubscriptionRoute
   '/superadmin/login': typeof SuperadminLoginRoute
+  '/superadmin/maintenance': typeof SuperadminMaintenanceRoute
+  '/superadmin/notifications': typeof SuperadminNotificationsRoute
   '/superadmin/payments': typeof SuperadminPaymentsRoute
   '/superadmin/salons': typeof SuperadminSalonsRoute
   '/superadmin/settings': typeof SuperadminSettingsRoute
@@ -206,6 +220,8 @@ export interface FileRoutesByTo {
   '/salon-portal/onboarding': typeof SalonPortalOnboardingRoute
   '/salon-portal/subscription': typeof SalonPortalSubscriptionRoute
   '/superadmin/login': typeof SuperadminLoginRoute
+  '/superadmin/maintenance': typeof SuperadminMaintenanceRoute
+  '/superadmin/notifications': typeof SuperadminNotificationsRoute
   '/superadmin/payments': typeof SuperadminPaymentsRoute
   '/superadmin/salons': typeof SuperadminSalonsRoute
   '/superadmin/settings': typeof SuperadminSettingsRoute
@@ -234,6 +250,8 @@ export interface FileRoutesById {
   '/salon-portal/onboarding': typeof SalonPortalOnboardingRoute
   '/salon-portal/subscription': typeof SalonPortalSubscriptionRoute
   '/superadmin/login': typeof SuperadminLoginRoute
+  '/superadmin/maintenance': typeof SuperadminMaintenanceRoute
+  '/superadmin/notifications': typeof SuperadminNotificationsRoute
   '/superadmin/payments': typeof SuperadminPaymentsRoute
   '/superadmin/salons': typeof SuperadminSalonsRoute
   '/superadmin/settings': typeof SuperadminSettingsRoute
@@ -263,6 +281,8 @@ export interface FileRouteTypes {
     | '/salon-portal/onboarding'
     | '/salon-portal/subscription'
     | '/superadmin/login'
+    | '/superadmin/maintenance'
+    | '/superadmin/notifications'
     | '/superadmin/payments'
     | '/superadmin/salons'
     | '/superadmin/settings'
@@ -288,6 +308,8 @@ export interface FileRouteTypes {
     | '/salon-portal/onboarding'
     | '/salon-portal/subscription'
     | '/superadmin/login'
+    | '/superadmin/maintenance'
+    | '/superadmin/notifications'
     | '/superadmin/payments'
     | '/superadmin/salons'
     | '/superadmin/settings'
@@ -315,6 +337,8 @@ export interface FileRouteTypes {
     | '/salon-portal/onboarding'
     | '/salon-portal/subscription'
     | '/superadmin/login'
+    | '/superadmin/maintenance'
+    | '/superadmin/notifications'
     | '/superadmin/payments'
     | '/superadmin/salons'
     | '/superadmin/settings'
@@ -487,6 +511,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SuperadminLoginRouteImport
       parentRoute: typeof SuperadminRoute
     }
+    '/superadmin/maintenance': {
+      id: '/superadmin/maintenance'
+      path: '/maintenance'
+      fullPath: '/superadmin/maintenance'
+      preLoaderRoute: typeof SuperadminMaintenanceRouteImport
+      parentRoute: typeof SuperadminRoute
+    }
+    '/superadmin/notifications': {
+      id: '/superadmin/notifications'
+      path: '/notifications'
+      fullPath: '/superadmin/notifications'
+      preLoaderRoute: typeof SuperadminNotificationsRouteImport
+      parentRoute: typeof SuperadminRoute
+    }
     '/superadmin/payments': {
       id: '/superadmin/payments'
       path: '/payments'
@@ -544,6 +582,8 @@ const SalonPortalRouteWithChildren = SalonPortalRoute._addFileChildren(
 
 interface SuperadminRouteChildren {
   SuperadminLoginRoute: typeof SuperadminLoginRoute
+  SuperadminMaintenanceRoute: typeof SuperadminMaintenanceRoute
+  SuperadminNotificationsRoute: typeof SuperadminNotificationsRoute
   SuperadminPaymentsRoute: typeof SuperadminPaymentsRoute
   SuperadminSalonsRoute: typeof SuperadminSalonsRoute
   SuperadminSettingsRoute: typeof SuperadminSettingsRoute
@@ -553,6 +593,8 @@ interface SuperadminRouteChildren {
 
 const SuperadminRouteChildren: SuperadminRouteChildren = {
   SuperadminLoginRoute: SuperadminLoginRoute,
+  SuperadminMaintenanceRoute: SuperadminMaintenanceRoute,
+  SuperadminNotificationsRoute: SuperadminNotificationsRoute,
   SuperadminPaymentsRoute: SuperadminPaymentsRoute,
   SuperadminSalonsRoute: SuperadminSalonsRoute,
   SuperadminSettingsRoute: SuperadminSettingsRoute,
